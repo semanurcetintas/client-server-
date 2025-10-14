@@ -1,11 +1,196 @@
-# server.py
+
 import socket
 import threading
 import struct
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 
-# ---------- Placeholder'lı Entry ----------
+ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+ALPHABET_LEN = 26
+
+def send_message(conn, text: str):
+    data = text.encode("utf-8")
+    conn.sendall(struct.pack(">I", len(data)) + data)
+
+def recv_message(conn):
+    hdr = conn.recv(4)
+    if not hdr: return None
+    (n,) = struct.unpack(">I", hdr)
+    data = b""
+    while len(data) < n:
+        chunk = conn.recv(n - len(data))
+        if not chunk: return None
+        data += chunk
+    return data.decode("utf-8")
+
+
+def caesar_decrypt(text: str, shift: int) -> str:
+    shift %= 26
+    out = []
+    for ch in text:
+        if "A" <= ch <= "Z":
+            out.append(chr((ord(ch)-65-shift) % 26 + 65))
+        elif "a" <= ch <= "z":
+            out.append(chr((ord(ch)-97-shift) % 26 + 97))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def vigenere_decrypt(text: str, key: str) -> str:
+    if not key or not key.isalpha():
+        raise ValueError("Vigenère anahtarı sadece harflerden oluşmalı (örn: LEMON).")
+    shifts = [(ord(c.upper())-65) % 26 for c in key]
+    out = []
+    j = 0
+    for ch in text:
+        if ch.isalpha():
+            s = shifts[j % len(shifts)]
+            if ch.isupper():
+                out.append(chr((ord(ch)-65-s) % 26 + 65))
+            else:
+                out.append(chr((ord(ch)-97-s) % 26 + 97))
+            j += 1
+        else:
+            out.append(ch)
+    return "".join(out)
+
+def _normalize_sub_key(key: str) -> str:
+    k = "".join([c for c in key.upper() if c.isalpha()])
+    if len(k) != 26 or len(set(k)) != 26:
+        raise ValueError("Substitution anahtarı 26 HARFTEN oluşan benzersiz bir permütasyon olmalı.")
+    return k
+
+def substitution_decrypt(text: str, key: str) -> str:
+    k = _normalize_sub_key(key)
+    map_up = {k[i]: ALPHABET[i] for i in range(26)}
+    map_lo = {k[i].lower(): ALPHABET[i].lower() for i in range(26)}
+    out = []
+    for ch in text:
+        if ch.isupper() and ch in map_up:
+            out.append(map_up[ch])
+        elif ch.islower() and ch in map_lo:
+            out.append(map_lo[ch])
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _pf_prepare_key(key: str):
+    s = []
+    seen = set()
+    for c in key.upper():
+        if c.isalpha():
+            c = "I" if c == "J" else c
+            if c not in seen:
+                seen.add(c); s.append(c)
+    for c in ALPHABET:
+        cc = "I" if c == "J" else c
+        if cc not in seen:
+            seen.add(cc); s.append(cc)
+    table = [c for c in s if c != "J"]
+    return [table[i*5:(i+1)*5] for i in range(5)]
+
+def _pf_pos(table):
+    pos = {}
+    for r in range(5):
+        for c in range(5):
+            pos[table[r][c]] = (r, c)
+    return pos
+
+def _pf_extract_cipher_letters(text: str):
+    letters = []
+    idx_map = []
+    for i, ch in enumerate(text):
+        if ch.isalpha():
+            letters.append("I" if ch.upper()=="J" else ch.upper())
+            idx_map.append(i)
+   
+    if len(letters) % 2 == 1:
+        letters.append("X")
+      
+        idx_map.append(None)
+    
+    pairs = []
+    for i in range(0, len(letters), 2):
+        pairs.append((letters[i], letters[i+1]))
+    return pairs, idx_map
+
+def playfair_decrypt(text: str, key: str) -> str:
+    if not key or not any(c.isalpha() for c in key):
+        raise ValueError("Playfair anahtarı harf içermeli (örn: SECURITY).")
+    table = _pf_prepare_key(key)
+    pos = _pf_pos(table)
+
+    pairs, idx_map = _pf_extract_cipher_letters(text)
+    out = list(text)
+
+    def dec_pair(a, b):
+        ra, ca = pos[a]; rb, cb = pos[b]
+        if ra == rb:
+            return (table[ra][(ca-1)%5], table[rb][(cb-1)%5])
+        if ca == cb:
+            return (table[(ra-1)%5][ca], table[(rb-1)%5][cb])
+        return (table[ra][cb], table[rb][ca])
+
+    letter_ptr = 0
+    for a, b in pairs:
+        da, db = dec_pair(a, b)
+        # place da
+        while letter_ptr < len(idx_map) and (idx_map[letter_ptr] is None or not text[idx_map[letter_ptr]].isalpha()):
+            letter_ptr += 1
+        if letter_ptr < len(idx_map) and idx_map[letter_ptr] is not None:
+            i = idx_map[letter_ptr]
+            out[i] = da if text[i].isupper() else da.lower()
+            letter_ptr += 1
+        # place db
+        while letter_ptr < len(idx_map) and (idx_map[letter_ptr] is None or not text[idx_map[letter_ptr]].isalpha()):
+            letter_ptr += 1
+        if letter_ptr < len(idx_map) and idx_map[letter_ptr] is not None:
+            i = idx_map[letter_ptr]
+            out[i] = db if text[i].isupper() else db.lower()
+            letter_ptr += 1
+
+    return "".join(out)
+
+def rail_fence_decrypt(cipher: str, rails: int) -> str:
+    if rails < 2:
+        raise ValueError("Rail Fence için ray sayısı en az 2 olmalı.")
+
+    n = len(cipher)
+    pattern = [0]*n
+    rail = 0
+    step = 1
+    for i in range(n):
+        pattern[i] = rail
+        rail += step
+        if rail == 0 or rail == rails-1:
+            step *= -1
+  
+    counts = [pattern.count(r) for r in range(rails)]
+   
+    idx = 0
+    rails_str = []
+    for c in counts:
+        rails_str.append(list(cipher[idx:idx+c]))
+        idx += c
+
+    res = []
+    rail_ptrs = [0]*rails
+    for r in pattern:
+        res.append(rails_str[r][rail_ptrs[r]])
+        rail_ptrs[r] += 1
+    return "".join(res)
+
+
+METHODS = [
+    "Sezar (Caesar)",
+    "Vigenère",
+    "Substitution",
+    "Playfair",
+    "Rail Fence"
+]
+
 class PlaceholderEntry(ttk.Entry):
     def __init__(self, master=None, placeholder="", **kw):
         super().__init__(master, **kw)
@@ -25,53 +210,20 @@ class PlaceholderEntry(ttk.Entry):
 
     def _focus_in(self, _):
         if self._has_placeholder:
-            self.delete(0, "end")
-            self.configure(foreground=self.default_fg)
-            self._has_placeholder = False
+            self.delete(0, "end"); self.configure(foreground=self.default_fg); self._has_placeholder = False
 
     def _focus_out(self, _):
         self._put_placeholder()
 
     def value(self):
-        # *** DÜZELTME: Artık sadece gerçekten placeholder modundaysa boş sayar. ***
         return "" if self._has_placeholder else self.get().strip()
 
-# ---------- Length-prefixed protokol ----------
-def send_message(conn, text: str):
-    data = text.encode("utf-8")
-    conn.sendall(struct.pack(">I", len(data)) + data)
-
-def recv_message(conn):
-    hdr = conn.recv(4)
-    if not hdr:
-        return None
-    (n,) = struct.unpack(">I", hdr)
-    data = b""
-    while len(data) < n:
-        chunk = conn.recv(n - len(data))
-        if not chunk:
-            return None
-        data += chunk
-    return data.decode("utf-8")
-
-# ---------- Caesar ----------
-def caesar_decrypt(text: str, shift: int) -> str:
-    out = []
-    for ch in text:
-        if "A" <= ch <= "Z":
-            out.append(chr((ord(ch)-65-shift) % 26 + 65))
-        elif "a" <= ch <= "z":
-            out.append(chr((ord(ch)-97-shift) % 26 + 97))
-        else:
-            out.append(ch)
-    return "".join(out)
-
-# ---------- Client handler thread ----------
 class ClientHandler(threading.Thread):
-    def __init__(self, conn, addr, key_getter, log_fn, push_fn):
+    def __init__(self, conn, addr, key_getter, method_getter, log_fn, push_fn):
         super().__init__(daemon=True)
         self.conn, self.addr = conn, addr
         self.key_getter = key_getter
+        self.method_getter = method_getter
         self.log = log_fn
         self.push = push_fn
 
@@ -85,12 +237,20 @@ class ClientHandler(threading.Thread):
                     break
                 self.log(f"Gelen şifreli: {msg}")
                 try:
-                    shift = int(self.key_getter())
-                except Exception:
-                    self.log("Anahtar geçersiz! (sayısal değil)")
-                    continue
-                plain = caesar_decrypt(msg, shift)
-                self.push(msg, plain)
+                    method, parsed = self._parse_key_method()
+                    if method == "caesar":
+                        plain = caesar_decrypt(msg, parsed)
+                    elif method == "vigenere":
+                        plain = vigenere_decrypt(msg, parsed)
+                    elif method == "substitution":
+                        plain = substitution_decrypt(msg, parsed)
+                    elif method == "playfair":
+                        plain = playfair_decrypt(msg, parsed)
+                    else:
+                        plain = rail_fence_decrypt(msg, parsed)
+                    self.push(msg, plain)
+                except Exception as e:
+                    self.log(f"Anahtar/Yöntem hatası: {e}")
         except Exception as e:
             self.log(f"Hata ({self.addr}): {e}")
         finally:
@@ -99,12 +259,34 @@ class ClientHandler(threading.Thread):
             except:
                 pass
 
-# ---------- Accept loop ----------
+    def _parse_key_method(self):
+        m = self.method_getter()
+        k = self.key_getter()
+        if m == "Sezar (Caesar)":
+            if not k.isdigit():
+                raise ValueError("Sezar için anahtar sayısal olmalı (örn: 3).")
+            return ("caesar", int(k))
+        elif m == "Vigenère":
+            if not k or not k.isalpha():
+                raise ValueError("Vigenère için anahtar sadece harflerden oluşmalı (örn: LEMON).")
+            return ("vigenere", k)
+        elif m == "Substitution":
+            return ("substitution", _normalize_sub_key(k))
+        elif m == "Playfair":
+            if not k or not any(c.isalpha() for c in k):
+                raise ValueError("Playfair için anahtar harf içermeli (örn: SECURITY).")
+            return ("playfair", k)
+        else:
+            if not k.isdigit() or int(k) < 2:
+                raise ValueError("Rail Fence için ray sayısı ≥ 2 olmalı (örn: 3).")
+            return ("railfence", int(k))
+
 class TCPServer(threading.Thread):
-    def __init__(self, host, port, key_getter, log_fn, push_fn):
+    def __init__(self, host, port, key_getter, method_getter, log_fn, push_fn):
         super().__init__(daemon=True)
         self.host, self.port = host, port
-        self.key_getter, self.log, self.push = key_getter, log_fn, push_fn
+        self.key_getter, self.method_getter = key_getter, method_getter
+        self.log, self.push = log_fn, push_fn
         self._stop = threading.Event()
         self.sock = None
 
@@ -113,7 +295,7 @@ class TCPServer(threading.Thread):
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.sock.bind((self.host, self.port))
-            self.sock.listen(8)  # çoklu istemci
+            self.sock.listen(8)
             self.log(f"Dinlemede: {self.host}:{self.port}")
             while not self._stop.is_set():
                 self.sock.settimeout(1.0)
@@ -121,7 +303,7 @@ class TCPServer(threading.Thread):
                     conn, addr = self.sock.accept()
                 except socket.timeout:
                     continue
-                ClientHandler(conn, addr, self.key_getter, self.log, self.push).start()
+                ClientHandler(conn, addr, self.key_getter, self.method_getter, self.log, self.push).start()
         except Exception as e:
             self.log(f"Sunucu hatası: {e}")
         finally:
@@ -132,42 +314,39 @@ class TCPServer(threading.Thread):
     def stop(self):
         self._stop.set()
 
-# ---------- GUI ----------
 class ServerGUI:
     def __init__(self, root):
-        self.root = root  # *** DÜZELTME: after() için gerekli ***
-        root.title("Sunucu - Mesaj Deşifreleme (Caesar)")
+        self.root = root
+        root.title("Sunucu - Mesaj Deşifreleme")
         style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except:
-            pass
+        try: style.theme_use("clam")
+        except: pass
 
         wrap = ttk.Frame(root, padding=12)
         wrap.grid(row=0, column=0, sticky="nsew")
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(0, weight=1)
+        root.columnconfigure(0, weight=1); root.rowconfigure(0, weight=1)
         wrap.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(wrap, text="Sunucu - Mesaj Deşifreleme", font=("Segoe UI", 16, "bold")).grid(row=r, column=0, columnspan=2, pady=(0,8), sticky="w")
-        r += 1
+        ttk.Label(wrap, text="Sunucu - Mesaj Deşifreleme", font=("Segoe UI", 16, "bold")).grid(row=r, column=0, columnspan=2, pady=(0,8), sticky="w"); r += 1
 
-        ttk.Label(wrap, text="Host (örn: localhost)").grid(row=r, column=0, sticky="w")
+        ttk.Label(wrap, text="Host").grid(row=r, column=0, sticky="w")
         self.host_entry = PlaceholderEntry(wrap, placeholder="localhost")
         self.host_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
-        ttk.Label(wrap, text="Port (örn: 3000)").grid(row=r, column=0, sticky="w")
+        ttk.Label(wrap, text="Port").grid(row=r, column=0, sticky="w")
         self.port_entry = PlaceholderEntry(wrap, placeholder="3000")
         self.port_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
         ttk.Label(wrap, text="Deşifreleme Yöntemi").grid(row=r, column=0, sticky="w")
-        self.method = ttk.Combobox(wrap, values=["Caesar Cipher (Kaydırma)"], state="readonly")
+        self.method = ttk.Combobox(wrap, values=METHODS, state="readonly")
         self.method.current(0)
-        self.method.grid(row=r, column=1, sticky="ew", padx=6); r += 1
+        self.method.grid(row=r, column=1, sticky="ew", padx=6)
+        self.method.bind("<<ComboboxSelected>>", self._on_method_change)
+        r += 1
 
-        ttk.Label(wrap, text="Anahtar (örn: 3)").grid(row=r, column=0, sticky="w")
-        self.key_entry = PlaceholderEntry(wrap, placeholder="3")
+        ttk.Label(wrap, text="Anahtar").grid(row=r, column=0, sticky="w")
+        self.key_entry = PlaceholderEntry(wrap, placeholder="Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | Playfair: SECURITY | Rail: 3")
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
         ttk.Label(wrap, text="Gelen Şifreli").grid(row=r, column=0, sticky="w")
@@ -178,8 +357,7 @@ class ServerGUI:
         self.out_text = scrolledtext.ScrolledText(wrap, height=6)
         self.out_text.grid(row=r, column=1, sticky="nsew", padx=6); r += 1
 
-        btns = ttk.Frame(wrap)
-        btns.grid(row=r, column=0, columnspan=2, pady=8, sticky="w")
+        btns = ttk.Frame(wrap); btns.grid(row=r, column=0, columnspan=2, pady=8, sticky="w")
         self.start_btn = ttk.Button(btns, text="Sunucuyu Başlat", command=self.start_server)
         self.stop_btn  = ttk.Button(btns, text="Sunucuyu Durdur", command=self.stop_server, state="disabled")
         self.clear_btn = ttk.Button(btns, text="Temizle", command=self.clear_all)
@@ -199,51 +377,53 @@ class ServerGUI:
 
         self.server = None
 
+    def _on_method_change(self, _):
+        m = self.method.get()
+        ph = {
+            "Sezar (Caesar)": "3",
+            "Vigenère": "LEMON",
+            "Substitution": "QWERTYUIOPASDFGHJKLZXCVBNM",
+            "Playfair": "SECURITY",
+            "Rail Fence": "3"
+        }[m]
+        self.key_entry.placeholder = ph
+        if not self.key_entry.value():
+            self.key_entry.delete(0, "end"); self.key_entry._has_placeholder=False; self.key_entry._put_placeholder()
+
     def log(self, s):
         self.log_text.insert("end", s + "\n"); self.log_text.see("end")
         self.status.config(text=s)
 
-    def _get_host_port_key(self):
+    def _get_host_port(self):
         host = self.host_entry.value()
         port_str = self.port_entry.value()
-        key_str  = self.key_entry.value()
-
-        if not host or not port_str or not key_str:
-            messagebox.showerror("Eksik bilgi", "Host, Port ve Anahtar boş bırakılamaz.")
-            return None
+        if not host or not port_str:
+            messagebox.showerror("Eksik bilgi", "Host ve Port boş bırakılamaz."); return None
         if not port_str.isdigit():
-            messagebox.showerror("Hata", "Port sayısal olmalı.")
-            return None
-        if not key_str.isdigit():
-            messagebox.showerror("Hata", "Anahtar sayısal olmalı.")
-            return None
-        return host, int(port_str), int(key_str)
+            messagebox.showerror("Hata", "Port sayısal olmalı."); return None
+        return host, int(port_str)
 
     def start_server(self):
         if self.server:
-            messagebox.showinfo("Bilgi", "Sunucu zaten çalışıyor.")
-            return
-        hpk = self._get_host_port_key()
-        if not hpk:
-            return
-        host, port, _ = hpk
+            messagebox.showinfo("Bilgi", "Sunucu zaten çalışıyor."); return
+        hp = self._get_host_port()
+        if not hp: return
+        host, port = hp
         self.server = TCPServer(
             host, port,
-            key_getter=lambda: self.key_entry.value(),  # *** varsayılan yok ***
+            key_getter=lambda: self.key_entry.value(),
+            method_getter=lambda: self.method.get(),
             log_fn=lambda s: self.root.after(0, self.log, s),
             push_fn=lambda c, p: self.root.after(0, self.push_to_gui, c, p)
         )
         self.server.start()
-        self.start_btn["state"] = "disabled"
-        self.stop_btn["state"] = "normal"
+        self.start_btn["state"] = "disabled"; self.stop_btn["state"] = "normal"
         self.log(f"Sunucu başlatıldı: {host}:{port}")
 
     def stop_server(self):
         if self.server:
-            self.server.stop()
-            self.server = None
-            self.start_btn["state"] = "normal"
-            self.stop_btn["state"] = "disabled"
+            self.server.stop(); self.server = None
+            self.start_btn["state"] = "normal"; self.stop_btn["state"] = "disabled"
             self.log("Sunucu durduruldu.")
 
     def push_to_gui(self, cipher, plain):
