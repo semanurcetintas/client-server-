@@ -1,9 +1,10 @@
-
+# server.py
 import socket
 import threading
 import struct
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
+import math
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
@@ -23,7 +24,6 @@ def recv_message(conn):
         data += chunk
     return data.decode("utf-8")
 
-
 def caesar_decrypt(text: str, shift: int) -> str:
     shift %= 26
     out = []
@@ -35,7 +35,6 @@ def caesar_decrypt(text: str, shift: int) -> str:
         else:
             out.append(ch)
     return "".join(out)
-
 
 def vigenere_decrypt(text: str, key: str) -> str:
     if not key or not key.isalpha():
@@ -76,6 +75,39 @@ def substitution_decrypt(text: str, key: str) -> str:
     return "".join(out)
 
 
+def _col_key_order(key: str):
+    if not key or not key.isalpha():
+        raise ValueError("Columnar için anahtar sadece harflerden oluşmalı (örn: ZEBRAS).")
+    K = [(c, i) for i, c in enumerate(key.upper())]
+    K_sorted = sorted(K, key=lambda x: (x[0], x[1]))
+    order = [orig_i for (_, orig_i) in K_sorted]
+    return order
+
+def columnar_decrypt(cipher: str, key: str) -> str:
+    order = _col_key_order(key)
+    m = len(order)
+    n = len(cipher)
+    if m == 0:
+        return cipher
+    rows = math.ceil(n / m)
+    rem = n % m
+    col_lengths = [(rows if (rem == 0 or i < rem) else (rows - 1)) for i in range(m)]
+
+    cols_data = [""] * m
+    idx = 0
+    for orig_col in order:
+        L = col_lengths[orig_col]
+        cols_data[orig_col] = cipher[idx:idx+L]
+        idx += L
+
+    out = []
+    for r in range(rows):
+        for c in range(m):
+            if r < len(cols_data[c]):
+                out.append(cols_data[c][r])
+    return "".join(out)
+
+
 def _pf_prepare_key(key: str):
     s = []
     seen = set()
@@ -105,12 +137,9 @@ def _pf_extract_cipher_letters(text: str):
         if ch.isalpha():
             letters.append("I" if ch.upper()=="J" else ch.upper())
             idx_map.append(i)
-   
     if len(letters) % 2 == 1:
         letters.append("X")
-      
         idx_map.append(None)
-    
     pairs = []
     for i in range(0, len(letters), 2):
         pairs.append((letters[i], letters[i+1]))
@@ -121,7 +150,6 @@ def playfair_decrypt(text: str, key: str) -> str:
         raise ValueError("Playfair anahtarı harf içermeli (örn: SECURITY).")
     table = _pf_prepare_key(key)
     pos = _pf_pos(table)
-
     pairs, idx_map = _pf_extract_cipher_letters(text)
     out = list(text)
 
@@ -136,14 +164,12 @@ def playfair_decrypt(text: str, key: str) -> str:
     letter_ptr = 0
     for a, b in pairs:
         da, db = dec_pair(a, b)
-        # place da
         while letter_ptr < len(idx_map) and (idx_map[letter_ptr] is None or not text[idx_map[letter_ptr]].isalpha()):
             letter_ptr += 1
         if letter_ptr < len(idx_map) and idx_map[letter_ptr] is not None:
             i = idx_map[letter_ptr]
             out[i] = da if text[i].isupper() else da.lower()
             letter_ptr += 1
-        # place db
         while letter_ptr < len(idx_map) and (idx_map[letter_ptr] is None or not text[idx_map[letter_ptr]].isalpha()):
             letter_ptr += 1
         if letter_ptr < len(idx_map) and idx_map[letter_ptr] is not None:
@@ -156,7 +182,6 @@ def playfair_decrypt(text: str, key: str) -> str:
 def rail_fence_decrypt(cipher: str, rails: int) -> str:
     if rails < 2:
         raise ValueError("Rail Fence için ray sayısı en az 2 olmalı.")
-
     n = len(cipher)
     pattern = [0]*n
     rail = 0
@@ -166,15 +191,12 @@ def rail_fence_decrypt(cipher: str, rails: int) -> str:
         rail += step
         if rail == 0 or rail == rails-1:
             step *= -1
-  
     counts = [pattern.count(r) for r in range(rails)]
-   
     idx = 0
     rails_str = []
     for c in counts:
         rails_str.append(list(cipher[idx:idx+c]))
         idx += c
-
     res = []
     rail_ptrs = [0]*rails
     for r in pattern:
@@ -183,12 +205,37 @@ def rail_fence_decrypt(cipher: str, rails: int) -> str:
     return "".join(res)
 
 
+_POLYBIUS_TABLE = [
+    ['A','B','C','D','E'],
+    ['F','G','H','I','K'],
+    ['L','M','N','O','P'],
+    ['Q','R','S','T','U'],
+    ['V','W','X','Y','Z'],
+]
+_POLY_DEC = {(r+1, c+1): _POLYBIUS_TABLE[r][c] for r in range(5) for c in range(5)}
+
+def polybius_decrypt(text: str) -> str:
+    out = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "12345" and i+1 < len(text) and text[i+1] in "12345":
+            r = int(text[i]); c = int(text[i+1])
+            out.append(_POLY_DEC[(r, c)])
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
 METHODS = [
     "Sezar (Caesar)",
     "Vigenère",
     "Substitution",
     "Playfair",
-    "Rail Fence"
+    "Rail Fence",
+    "Columnar Transposition",
+    "Polybius"
 ]
 
 class PlaceholderEntry(ttk.Entry):
@@ -246,8 +293,12 @@ class ClientHandler(threading.Thread):
                         plain = substitution_decrypt(msg, parsed)
                     elif method == "playfair":
                         plain = playfair_decrypt(msg, parsed)
-                    else:
+                    elif method == "railfence":
                         plain = rail_fence_decrypt(msg, parsed)
+                    elif method == "columnar":
+                        plain = columnar_decrypt(msg, parsed)
+                    else:  # polybius
+                        plain = polybius_decrypt(msg)
                     self.push(msg, plain)
                 except Exception as e:
                     self.log(f"Anahtar/Yöntem hatası: {e}")
@@ -276,10 +327,16 @@ class ClientHandler(threading.Thread):
             if not k or not any(c.isalpha() for c in k):
                 raise ValueError("Playfair için anahtar harf içermeli (örn: SECURITY).")
             return ("playfair", k)
-        else:
+        elif m == "Rail Fence":
             if not k.isdigit() or int(k) < 2:
                 raise ValueError("Rail Fence için ray sayısı ≥ 2 olmalı (örn: 3).")
             return ("railfence", int(k))
+        elif m == "Columnar Transposition":
+            if not k or not k.isalpha():
+                raise ValueError("Columnar için anahtar sadece harflerden oluşmalı (örn: ZEBRAS).")
+            return ("columnar", k)
+        else:  # Polybius - anahtarsız
+            return ("polybius", None)
 
 class TCPServer(threading.Thread):
     def __init__(self, host, port, key_getter, method_getter, log_fn, push_fn):
@@ -346,7 +403,10 @@ class ServerGUI:
         r += 1
 
         ttk.Label(wrap, text="Anahtar").grid(row=r, column=0, sticky="w")
-        self.key_entry = PlaceholderEntry(wrap, placeholder="Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | Playfair: SECURITY | Rail: 3")
+        self.key_entry = PlaceholderEntry(
+            wrap,
+            placeholder="Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | Polybius: (anahtar gerekmez)"
+        )
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
         ttk.Label(wrap, text="Gelen Şifreli").grid(row=r, column=0, sticky="w")
@@ -384,7 +444,9 @@ class ServerGUI:
             "Vigenère": "LEMON",
             "Substitution": "QWERTYUIOPASDFGHJKLZXCVBNM",
             "Playfair": "SECURITY",
-            "Rail Fence": "3"
+            "Rail Fence": "3",
+            "Columnar Transposition": "ZEBRAS",
+            "Polybius": "(anahtar gerekmez)"
         }[m]
         self.key_entry.placeholder = ph
         if not self.key_entry.value():
@@ -435,6 +497,39 @@ class ServerGUI:
         self.out_text.delete("1.0", "end")
         self.log_text.delete("1.0", "end")
         self.status.config(text="Temizlendi")
+
+class TCPServer(threading.Thread):
+    def __init__(self, host, port, key_getter, method_getter, log_fn, push_fn):
+        super().__init__(daemon=True)
+        self.host, self.port = host, port
+        self.key_getter, self.method_getter = key_getter, method_getter
+        self.log, self.push = log_fn, push_fn
+        self._stop = threading.Event()
+        self.sock = None
+
+    def run(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind((self.host, self.port))
+            self.sock.listen(8)
+            self.log(f"Dinlemede: {self.host}:{self.port}")
+            while not self._stop.is_set():
+                self.sock.settimeout(1.0)
+                try:
+                    conn, addr = self.sock.accept()
+                except socket.timeout:
+                    continue
+                ClientHandler(conn, addr, self.key_getter, self.method_getter, self.log, self.push).start()
+        except Exception as e:
+            self.log(f"Sunucu hatası: {e}")
+        finally:
+            if self.sock:
+                self.sock.close()
+            self.log("Sunucu durdu.")
+
+    def stop(self):
+        self._stop.set()
 
 if __name__ == "__main__":
     root = tk.Tk()

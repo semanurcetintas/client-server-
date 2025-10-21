@@ -4,7 +4,7 @@ import struct
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-
+import math
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
@@ -12,7 +12,6 @@ ALPHABET_LEN = 26
 def send_message(sock, text: str):
     data = text.encode("utf-8")
     sock.sendall(struct.pack(">I", len(data)) + data)
-
 
 def caesar_encrypt(text: str, shift: int) -> str:
     shift %= 26
@@ -25,7 +24,6 @@ def caesar_encrypt(text: str, shift: int) -> str:
         else:
             out.append(ch)
     return "".join(out)
-
 
 def vigenere_encrypt(text: str, key: str) -> str:
     if not key or not key.isalpha():
@@ -44,7 +42,6 @@ def vigenere_encrypt(text: str, key: str) -> str:
         else:
             out.append(ch)
     return "".join(out)
-
 
 def _normalize_sub_key(key: str) -> str:
     k = "".join([c for c in key.upper() if c.isalpha()])
@@ -67,22 +64,48 @@ def substitution_encrypt(text: str, key: str) -> str:
     return "".join(out)
 
 
-def _pf_prepare_key(key: str):
+def _col_key_order(key: str):
+    if not key or not key.isalpha():
+        raise ValueError("Columnar için anahtar sadece harflerden oluşmalı (örn: ZEBRAS).")
+    K = [(c, i) for i, c in enumerate(key.upper())]
+    K_sorted = sorted(K, key=lambda x: (x[0], x[1]))
+    order = [orig_i for (_, orig_i) in K_sorted]
+    return order
 
+def columnar_encrypt(text: str, key: str) -> str:
+    order = _col_key_order(key)
+    m = len(order)
+    n = len(text)
+    rows = math.ceil(n / m) if m > 0 else 0
+
+    rows_buf = []
+    idx = 0
+    for _ in range(rows):
+        row = list(text[idx:idx+m])
+        idx += len(row)
+        rows_buf.append(row)
+
+    out = []
+    for col in order:
+        for r in range(rows):
+            row = rows_buf[r]
+            if col < len(row):
+                out.append(row[col])
+    return "".join(out)
+
+
+def _pf_prepare_key(key: str):
     s = []
     seen = set()
     for c in key.upper():
         if c.isalpha():
             c = "I" if c == "J" else c
             if c not in seen:
-                seen.add(c)
-                s.append(c)
+                seen.add(c); s.append(c)
     for c in ALPHABET:
         cc = "I" if c == "J" else c
         if cc not in seen:
-            seen.add(cc)
-            s.append(cc)
-
+            seen.add(cc); s.append(cc)
     table = [c for c in s if c != "J"]
     return [table[i*5:(i+1)*5] for i in range(5)]
 
@@ -100,7 +123,6 @@ def _pf_prepare_plain(plain: str):
         if ch.isalpha():
             letters.append("I" if ch.upper() == "J" else ch.upper())
             idx_map.append(i)
-
     digraphs = []
     i = 0
     while i < len(letters):
@@ -123,13 +145,11 @@ def playfair_encrypt(text: str, key: str) -> str:
         raise ValueError("Playfair anahtarı harf içermeli (örn: SECURITY).")
     table = _pf_prepare_key(key)
     pos = _pf_pos(table)
-
     digraphs, idx_map = _pf_prepare_plain(text)
     out = list(text)
 
     def enc_pair(a, b):
-        ra, ca = pos[a]
-        rb, cb = pos[b]
+        ra, ca = pos[a]; rb, cb = pos[b]
         if ra == rb:
             return (table[ra][(ca+1)%5], table[rb][(cb+1)%5])
         if ca == cb:
@@ -139,14 +159,12 @@ def playfair_encrypt(text: str, key: str) -> str:
     letter_idx = 0
     for a, b in digraphs:
         ea, eb = enc_pair(a, b)
-        # place ea
         while letter_idx < len(idx_map) and not text[idx_map[letter_idx]].isalpha():
             letter_idx += 1
         if letter_idx < len(idx_map):
             i = idx_map[letter_idx]
             out[i] = ea if text[i].isupper() else ea.lower()
             letter_idx += 1
-        # place eb
         while letter_idx < len(idx_map) and not text[idx_map[letter_idx]].isalpha():
             letter_idx += 1
         if letter_idx < len(idx_map):
@@ -159,7 +177,6 @@ def playfair_encrypt(text: str, key: str) -> str:
 def rail_fence_encrypt(text: str, rails: int) -> str:
     if rails < 2:
         raise ValueError("Rail Fence için ray sayısı en az 2 olmalı.")
-
     fence = [[] for _ in range(rails)]
     rail = 0
     step = 1
@@ -171,12 +188,34 @@ def rail_fence_encrypt(text: str, rails: int) -> str:
     return "".join("".join(row) for row in fence)
 
 
+_POLYBIUS_TABLE = [
+    ['A','B','C','D','E'],
+    ['F','G','H','I','K'],
+    ['L','M','N','O','P'],
+    ['Q','R','S','T','U'],
+    ['V','W','X','Y','Z'],
+]
+_POLY_ENC = { _POLYBIUS_TABLE[r][c]: f"{r+1}{c+1}" for r in range(5) for c in range(5) }
+
+def polybius_encrypt(text: str) -> str:
+    out = []
+    for ch in text:
+        if ch.isalpha():
+            cu = ch.upper()
+            cu = 'I' if cu == 'J' else cu
+            out.append(_POLY_ENC[cu])
+        else:
+            out.append(ch)
+    return "".join(out)
+
 METHODS = [
     "Sezar (Caesar)",
     "Vigenère",
     "Substitution",
     "Playfair",
-    "Rail Fence"
+    "Rail Fence",
+    "Columnar Transposition",
+    "Polybius"
 ]
 
 class PlaceholderEntry(ttk.Entry):
@@ -233,7 +272,10 @@ class ClientGUI:
         r += 1
 
         ttk.Label(wrap, text="Anahtar").grid(row=r, column=0, sticky="w")
-        self.key_entry = PlaceholderEntry(wrap, placeholder="Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | Playfair: SECURITY | Rail: 3")
+        self.key_entry = PlaceholderEntry(
+            wrap,
+            placeholder="Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | Polybius: (anahtar gerekmez)"
+        )
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
         ttk.Label(wrap, text="Mesaj").grid(row=r, column=0, sticky="w")
@@ -257,7 +299,9 @@ class ClientGUI:
             "Vigenère": "LEMON",
             "Substitution": "QWERTYUIOPASDFGHJKLZXCVBNM",
             "Playfair": "SECURITY",
-            "Rail Fence": "3"
+            "Rail Fence": "3",
+            "Columnar Transposition": "ZEBRAS",
+            "Polybius": "(anahtar gerekmez)"
         }[m]
         self.key_entry.placeholder = ph
         if not self.key_entry.value():
@@ -283,10 +327,16 @@ class ClientGUI:
             if not k or not any(c.isalpha() for c in k):
                 raise ValueError("Playfair için anahtar harf içermeli (örn: SECURITY).")
             return ("playfair", k)
-        else:  # Rail Fence
+        elif m == "Rail Fence":
             if not k.isdigit() or int(k) < 2:
                 raise ValueError("Rail Fence için ray sayısı ≥ 2 olmalı (örn: 3).")
             return ("railfence", int(k))
+        elif m == "Columnar Transposition":
+            if not k or not k.isalpha():
+                raise ValueError("Columnar için anahtar sadece harflerden oluşmalı (örn: ZEBRAS).")
+            return ("columnar", k)
+        else:  # Polybius - anahtarsız
+            return ("polybius", None)
 
     def _encrypt(self, plain: str):
         method, key = self._parse_key()
@@ -298,7 +348,12 @@ class ClientGUI:
             return substitution_encrypt(plain, key)
         if method == "playfair":
             return playfair_encrypt(plain, key)
-        return rail_fence_encrypt(plain, key)
+        if method == "railfence":
+            return rail_fence_encrypt(plain, key)
+        if method == "columnar":
+            return columnar_encrypt(plain, key)
+        # polybius
+        return polybius_encrypt(plain)
 
     def send_to_server(self):
         host = self.host_entry.value()
