@@ -1,7 +1,6 @@
-# client.py
 import socket
-import struct
 import threading
+import struct
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import math
@@ -9,9 +8,123 @@ import math
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
 
-def send_message(sock, text: str):
-    data = text.encode("utf-8")
-    sock.sendall(struct.pack(">I", len(data)) + data)
+# =========================
+# HILL ORTAK YARDIMCI FONKSİYONLAR (ŞİFRELEME İÇİN GEREKENLER)
+# =========================
+
+def _char_to_num(ch: str) -> int:
+    # A/a -> 0 ... Z/z -> 25
+    return ord(ch.upper()) - ord('A')
+
+def _num_to_char(n: int, upper_like: str) -> str:
+    # sayıyı tekrar harfe çevirirken orijinal harfin büyük/küçük durumunu koru
+    base = ord('A') if upper_like.isupper() else ord('a')
+    return chr(base + (n % 26))
+
+def _matrix_vec_mul(mat, vec, mod: int):
+    n = len(mat)
+    out = [0]*n
+    for r in range(n):
+        acc = 0
+        for c in range(n):
+            acc += mat[r][c] * vec[c]
+        out[r] = acc % mod
+    return out
+
+def parse_hill_key(key_text: str):
+    """
+    Kullanıcı Hill anahtarını boşlukla ayırarak girer:
+      "3 3 2 5"                -> 2x2
+      "6 24 1 13 16 10 20 17 15" -> 3x3
+    Genel kural: n^2 sayı -> n x n matris.
+    Hepsini mod 26'ya indiriyoruz.
+    """
+    parts = key_text.replace(",", " ").split()
+    if len(parts) == 0:
+        raise ValueError("Hill için anahtar boş olamaz.")
+
+    nums = []
+    for p in parts:
+        if not p.lstrip("-").isdigit():
+            raise ValueError("Hill anahtarındaki değerler tam sayı olmalı.")
+        nums.append(int(p) % 26)
+
+    length = len(nums)
+    n = int(round(length ** 0.5))
+    if n * n != length:
+        raise ValueError("Hill anahtarı n^2 adet sayı olmalı (örn 4 sayı=2x2, 9 sayı=3x3).")
+
+    mat = []
+    idx = 0
+    for _ in range(n):
+        row = nums[idx:idx+n]
+        idx += n
+        mat.append(row)
+
+    return mat
+
+def _extract_letters_with_index(text: str):
+    """
+    Metindeki sadece harfleri sırayla çek.
+    Ör: 'HeLlo!' -> letters=['H','e','L','l','o'], idx=[0,1,2,3,4]
+    """
+    letters = []
+    idx_map = []
+    for i,ch in enumerate(text):
+        if ch.isalpha():
+            letters.append(ch)
+            idx_map.append(i)
+    return letters, idx_map
+
+def _reinject_letters(original_text: str, new_letters, idx_map):
+    """
+    Şifrelenmiş harfleri eski konumlarına koy.
+    Harf olmayan karakterler (boşluk, noktalama) yerinde kalır.
+    """
+    out_chars = list(original_text)
+    ptr = 0
+    for pos in idx_map:
+        out_chars[pos] = new_letters[ptr]
+        ptr += 1
+    return "".join(out_chars)
+
+def hill_encrypt(text: str, key_mat):
+    """
+    Hill şifreleme (genel n x n):
+    - Sadece harfleri blok blok işler.
+    - Blok boyutu = matris boyutu n
+    - Eksik blok olursa 'X' ile doldurur.
+    - Harf olmayan karakterler yerinde kalır.
+    - Padding nedeniyle fazladan çıkan şifreli harf varsa,
+      orijinal metnin sonuna ekleriz ki kaybolmasın.
+    """
+    n = len(key_mat)
+    letters, idx_map = _extract_letters_with_index(text)
+
+    # padding
+    if len(letters) % n != 0:
+        pad_needed = n - (len(letters) % n)
+        letters += ['X'] * pad_needed
+
+    enc_letters = []
+    for i in range(0, len(letters), n):
+        block = letters[i:i+n]
+        nums = [_char_to_num(ch) for ch in block]
+        enc_nums = _matrix_vec_mul(key_mat, nums, 26)
+        enc_block = [_num_to_char(enc_nums[j], block[j]) for j in range(n)]
+        enc_letters.extend(enc_block)
+
+    original_letter_count = len(idx_map)
+    reinjected = _reinject_letters(text, enc_letters[:original_letter_count], idx_map)
+
+    if len(enc_letters) > original_letter_count:
+        reinjected += "".join(enc_letters[original_letter_count:])
+
+    return reinjected
+
+# =========================
+# DİĞER ŞİFRELEME YÖNTEMLERİ
+# =========================
 
 def caesar_encrypt(text: str, shift: int) -> str:
     shift %= 26
@@ -63,7 +176,6 @@ def substitution_encrypt(text: str, key: str) -> str:
             out.append(ch)
     return "".join(out)
 
-
 def _col_key_order(key: str):
     if not key or not key.isalpha():
         raise ValueError("Columnar için anahtar sadece harflerden oluşmalı (örn: ZEBRAS).")
@@ -92,7 +204,6 @@ def columnar_encrypt(text: str, key: str) -> str:
             if col < len(row):
                 out.append(row[col])
     return "".join(out)
-
 
 def _pf_prepare_key(key: str):
     s = []
@@ -187,7 +298,6 @@ def rail_fence_encrypt(text: str, rails: int) -> str:
             step *= -1
     return "".join("".join(row) for row in fence)
 
-
 _POLYBIUS_TABLE = [
     ['A','B','C','D','E'],
     ['F','G','H','I','K'],
@@ -208,6 +318,18 @@ def polybius_encrypt(text: str) -> str:
             out.append(ch)
     return "".join(out)
 
+# =========================
+# SOCKET GÖNDERME
+# =========================
+
+def send_message(sock, text: str):
+    data = text.encode("utf-8")
+    sock.sendall(struct.pack(">I", len(data)) + data)
+
+# =========================
+# GUI
+# =========================
+
 METHODS = [
     "Sezar (Caesar)",
     "Vigenère",
@@ -215,7 +337,8 @@ METHODS = [
     "Playfair",
     "Rail Fence",
     "Columnar Transposition",
-    "Polybius"
+    "Polybius",
+    "Hill"
 ]
 
 class PlaceholderEntry(ttk.Entry):
@@ -237,7 +360,9 @@ class PlaceholderEntry(ttk.Entry):
 
     def _focus_in(self, _):
         if self._has_placeholder:
-            self.delete(0, "end"); self.configure(foreground=self.default_fg); self._has_placeholder = False
+            self.delete(0, "end")
+            self.configure(foreground=self.default_fg)
+            self._has_placeholder = False
 
     def _focus_out(self, _):
         self._put_placeholder()
@@ -248,20 +373,23 @@ class PlaceholderEntry(ttk.Entry):
 class ClientGUI:
     def __init__(self, root):
         root.title("İstemci - Mesaj Şifreleme")
+
         wrap = ttk.Frame(root, padding=12)
         wrap.grid(row=0, column=0, sticky="nsew")
         root.columnconfigure(0, weight=1)
         wrap.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(wrap, text="İstemci - Mesaj Şifreleme", font=("Segoe UI", 16, "bold")).grid(row=r, column=0, columnspan=2, pady=(0,8), sticky="w"); r += 1
+        ttk.Label(wrap, text="İstemci - Mesaj Şifreleme", font=("Segoe UI", 16, "bold")).grid(
+            row=r, column=0, columnspan=2, pady=(0,8), sticky="w"
+        ); r += 1
 
         ttk.Label(wrap, text="Sunucu Host").grid(row=r, column=0, sticky="w")
-        self.host_entry = PlaceholderEntry(wrap, placeholder="localhost")
+        self.host_entry = PlaceholderEntry(wrap, placeholder="127.0.0.1")
         self.host_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
         ttk.Label(wrap, text="Sunucu Port").grid(row=r, column=0, sticky="w")
-        self.port_entry = PlaceholderEntry(wrap, placeholder="3000")
+        self.port_entry = PlaceholderEntry(wrap, placeholder="5000")
         self.port_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
         ttk.Label(wrap, text="Yöntem").grid(row=r, column=0, sticky="w")
@@ -274,23 +402,29 @@ class ClientGUI:
         ttk.Label(wrap, text="Anahtar").grid(row=r, column=0, sticky="w")
         self.key_entry = PlaceholderEntry(
             wrap,
-            placeholder="Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | Polybius: (anahtar gerekmez)"
+            placeholder=(
+                "Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | "
+                "Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | "
+                "Polybius: (gerekmez) | Hill: '3 3 2 5'"
+            )
         )
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
         ttk.Label(wrap, text="Mesaj").grid(row=r, column=0, sticky="w")
-        self.msg_text = scrolledtext.ScrolledText(wrap, height=6)
+        self.msg_text = scrolledtext.ScrolledText(wrap, height=4)
         self.msg_text.grid(row=r, column=1, sticky="nsew", padx=6); r += 1
 
-        btns = ttk.Frame(wrap); btns.grid(row=r, column=0, columnspan=2, pady=8, sticky="w")
+        btns = ttk.Frame(wrap)
+        btns.grid(row=r, column=0, columnspan=2, pady=8, sticky="w")
         ttk.Button(btns, text="Şifrele ve Gönder", command=self.send_to_server).pack(side="left", padx=4)
-        ttk.Button(btns, text="Temizle", command=lambda: self.msg_text.delete("1.0", "end")).pack(side="left", padx=4); r += 1
+        ttk.Button(btns, text="Temizle", command=lambda: self.msg_text.delete("1.0", "end")).pack(side="left", padx=4)
+        r += 1
 
         ttk.Label(wrap, text="İstemci Log").grid(row=r, column=0, sticky="w")
         self.log_text = scrolledtext.ScrolledText(wrap, height=8)
         self.log_text.grid(row=r, column=1, sticky="nsew", padx=6); r += 1
 
-        wrap.rowconfigure(6, weight=1)
+        wrap.rowconfigure(5, weight=1)
 
     def _on_method_change(self, _):
         m = self.method.get()
@@ -301,45 +435,63 @@ class ClientGUI:
             "Playfair": "SECURITY",
             "Rail Fence": "3",
             "Columnar Transposition": "ZEBRAS",
-            "Polybius": "(anahtar gerekmez)"
+            "Polybius": "(anahtar gerekmez)",
+            "Hill": "Örn: '3 3 2 5' (2x2) | '6 24 1 13 16 10 20 17 15' (3x3)"
         }[m]
         self.key_entry.placeholder = ph
         if not self.key_entry.value():
-            self.key_entry.delete(0, "end"); self.key_entry._has_placeholder=False; self.key_entry._put_placeholder()
+            self.key_entry.delete(0, "end")
+            self.key_entry._has_placeholder=False
+            self.key_entry._put_placeholder()
 
     def log(self, s):
-        self.log_text.insert("end", s + "\n"); self.log_text.see("end")
+        self.log_text.insert("end", s + "\n")
+        self.log_text.see("end")
 
     def _parse_key(self):
         m = self.method.get()
         k = self.key_entry.value()
+
         if m == "Sezar (Caesar)":
             if not k.isdigit():
                 raise ValueError("Sezar için anahtar sayısal olmalı (örn: 3).")
             return ("caesar", int(k))
+
         elif m == "Vigenère":
             if not k or not k.isalpha():
                 raise ValueError("Vigenère için anahtar sadece harflerden oluşmalı (örn: LEMON).")
             return ("vigenere", k)
+
         elif m == "Substitution":
             return ("substitution", _normalize_sub_key(k))
+
         elif m == "Playfair":
             if not k or not any(c.isalpha() for c in k):
                 raise ValueError("Playfair için anahtar harf içermeli (örn: SECURITY).")
             return ("playfair", k)
+
         elif m == "Rail Fence":
             if not k.isdigit() or int(k) < 2:
                 raise ValueError("Rail Fence için ray sayısı ≥ 2 olmalı (örn: 3).")
             return ("railfence", int(k))
+
         elif m == "Columnar Transposition":
             if not k or not k.isalpha():
                 raise ValueError("Columnar için anahtar sadece harflerden oluşmalı (örn: ZEBRAS).")
             return ("columnar", k)
-        else:  # Polybius - anahtarsız
+
+        elif m == "Polybius":
             return ("polybius", None)
+
+        elif m == "Hill":
+            return ("hill", parse_hill_key(k))
+
+        else:
+            raise ValueError("Bilinmeyen yöntem")
 
     def _encrypt(self, plain: str):
         method, key = self._parse_key()
+
         if method == "caesar":
             return caesar_encrypt(plain, key)
         if method == "vigenere":
@@ -352,29 +504,41 @@ class ClientGUI:
             return rail_fence_encrypt(plain, key)
         if method == "columnar":
             return columnar_encrypt(plain, key)
-        # polybius
-        return polybius_encrypt(plain)
+        if method == "polybius":
+            return polybius_encrypt(plain)
+        if method == "hill":
+            return hill_encrypt(plain, key)
+
+        return plain  # fallback
 
     def send_to_server(self):
         host = self.host_entry.value()
         port_str = self.port_entry.value()
-        if not host or not port_str:
-            messagebox.showerror("Eksik bilgi", "Host ve Port boş bırakılamaz."); return
-        if not port_str.isdigit():
-            messagebox.showerror("Hata", "Port sayısal olmalı."); return
-        port = int(port_str)
 
+        if not host or not port_str:
+            messagebox.showerror("Eksik bilgi", "Host ve Port boş bırakılamaz.")
+            return
+        if not port_str.isdigit():
+            messagebox.showerror("Hata", "Port sayısal olmalı.")
+            return
+
+        port = int(port_str)
         plain = self.msg_text.get("1.0", "end").rstrip("\n")
+
         if not plain:
-            messagebox.showinfo("Bilgi", "Göndermek için bir mesaj yazın."); return
+            messagebox.showinfo("Bilgi", "Göndermek için bir mesaj yazın.")
+            return
 
         try:
             cipher = self._encrypt(plain)
         except Exception as e:
-            messagebox.showerror("Anahtar Hatası", str(e)); return
+            messagebox.showerror("Anahtar Hatası", str(e))
+            return
 
+        # log
         self.log(f"Şifrelenmiş: {cipher}")
 
+        # sokete gönder (thread ile)
         def do_send():
             try:
                 with socket.create_connection((host, port), timeout=5) as s:

@@ -1,4 +1,3 @@
-# server.py
 import socket
 import threading
 import struct
@@ -9,20 +8,156 @@ import math
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
 
-def send_message(conn, text: str):
-    data = text.encode("utf-8")
-    conn.sendall(struct.pack(">I", len(data)) + data)
+# =========================
+# HILL ORTAK YARDIMCI FONKSİYONLAR (DEŞİFRE İÇİN GEREKENLER)
+# =========================
 
-def recv_message(conn):
-    hdr = conn.recv(4)
-    if not hdr: return None
-    (n,) = struct.unpack(">I", hdr)
-    data = b""
-    while len(data) < n:
-        chunk = conn.recv(n - len(data))
-        if not chunk: return None
-        data += chunk
-    return data.decode("utf-8")
+def _char_to_num(ch: str) -> int:
+    return ord(ch.upper()) - ord('A')
+
+def _num_to_char(n: int, upper_like: str) -> str:
+    base = ord('A') if upper_like.isupper() else ord('a')
+    return chr(base + (n % 26))
+
+def _matrix_vec_mul(mat, vec, mod: int):
+    n = len(mat)
+    out = [0]*n
+    for r in range(n):
+        acc = 0
+        for c in range(n):
+            acc += mat[r][c] * vec[c]
+        out[r] = acc % mod
+    return out
+
+def _modinv(a: int, m: int) -> int:
+    a = a % m
+    for x in range(1, m):
+        if (a * x) % m == 1:
+            return x
+    raise ValueError("Hill anahtarı geçersiz: determinant mod 26 terslenemiyor (gcd(det,26)!=1).")
+
+def _matrix_det_mod(mat, mod: int) -> int:
+    n = len(mat)
+    if n == 1:
+        return mat[0][0] % mod
+    if n == 2:
+        return (mat[0][0]*mat[1][1] - mat[0][1]*mat[1][0]) % mod
+    det = 0
+    for c in range(n):
+        sub = [row[:c] + row[c+1:] for row in mat[1:]]
+        cofactor = ((-1) ** c) * mat[0][c] * _matrix_det_mod(sub, mod)
+        det += cofactor
+    return det % mod
+
+def _matrix_minor(mat, r, c):
+    return [row[:c] + row[c+1:] for i, row in enumerate(mat) if i != r]
+
+def _matrix_cofactor_matrix(mat, mod: int):
+    n = len(mat)
+    cof = [[0]*n for _ in range(n)]
+    for r in range(n):
+        for c in range(n):
+            minor = _matrix_minor(mat, r, c)
+            det_minor = _matrix_det_mod(minor, mod)
+            cof[r][c] = ((-1) ** (r+c)) * det_minor % mod
+    return cof
+
+def _transpose(mat):
+    return [list(row) for row in zip(*mat)]
+
+def _matrix_scalar_mul(mat, scalar, mod: int):
+    return [[(val * scalar) % mod for val in row] for row in mat]
+
+def _matrix_mod(mat, mod: int):
+    return [[val % mod for val in row] for row in mat]
+
+def _matrix_inv_mod(mat, mod: int):
+    n = len(mat)
+    if any(len(row) != n for row in mat):
+        raise ValueError("Hill anahtarı kare matris olmalı.")
+
+    det = _matrix_det_mod(mat, mod)
+    inv_det = _modinv(det, mod)
+
+    if n == 1:
+        return [[inv_det % mod]]
+
+    cof = _matrix_cofactor_matrix(mat, mod)
+    adj = _transpose(cof)
+    inv_mat = _matrix_scalar_mul(adj, inv_det, mod)
+    return _matrix_mod(inv_mat, mod)
+
+def parse_hill_key(key_text: str):
+    parts = key_text.replace(",", " ").split()
+    if len(parts) == 0:
+        raise ValueError("Hill için anahtar boş olamaz.")
+
+    nums = []
+    for p in parts:
+        if not p.lstrip("-").isdigit():
+            raise ValueError("Hill anahtarındaki değerler tam sayı olmalı.")
+        nums.append(int(p) % 26)
+
+    length = len(nums)
+    n = int(round(length ** 0.5))
+    if n * n != length:
+        raise ValueError("Hill anahtarı n^2 adet sayı olmalı (örn 4 sayı=2x2, 9 sayı=3x3).")
+
+    mat = []
+    idx = 0
+    for _ in range(n):
+        row = nums[idx:idx+n]
+        idx += n
+        mat.append(row)
+
+    return mat
+
+def _extract_letters_with_index(text: str):
+    letters = []
+    idx_map = []
+    for i,ch in enumerate(text):
+        if ch.isalpha():
+            letters.append(ch)
+            idx_map.append(i)
+    return letters, idx_map
+
+def _reinject_letters(original_text: str, new_letters, idx_map):
+    out_chars = list(original_text)
+    ptr = 0
+    for pos in idx_map:
+        out_chars[pos] = new_letters[ptr]
+        ptr += 1
+    return "".join(out_chars)
+
+def hill_decrypt(text: str, key_mat):
+    n = len(key_mat)
+    inv_mat = _matrix_inv_mod(key_mat, 26)  # determinant terslenemezse hata atacak
+
+    letters, idx_map = _extract_letters_with_index(text)
+
+    if len(letters) % n != 0:
+        pad_needed = n - (len(letters) % n)
+        letters += ['X'] * pad_needed
+
+    dec_letters = []
+    for i in range(0, len(letters), n):
+        block = letters[i:i+n]
+        nums = [_char_to_num(ch) for ch in block]
+        dec_nums = _matrix_vec_mul(inv_mat, nums, 26)
+        dec_block = [_num_to_char(dec_nums[j], block[j]) for j in range(n)]
+        dec_letters.extend(dec_block)
+
+    original_letter_count = len(idx_map)
+    reinjected = _reinject_letters(text, dec_letters[:original_letter_count], idx_map)
+
+    if len(dec_letters) > original_letter_count:
+        reinjected += "".join(dec_letters[original_letter_count:])
+
+    return reinjected
+
+# =========================
+# DİĞER DEŞİFRE YÖNTEMLERİ
+# =========================
 
 def caesar_decrypt(text: str, shift: int) -> str:
     shift %= 26
@@ -74,7 +209,6 @@ def substitution_decrypt(text: str, key: str) -> str:
             out.append(ch)
     return "".join(out)
 
-
 def _col_key_order(key: str):
     if not key or not key.isalpha():
         raise ValueError("Columnar için anahtar sadece harflerden oluşmalı (örn: ZEBRAS).")
@@ -106,7 +240,6 @@ def columnar_decrypt(cipher: str, key: str) -> str:
             if r < len(cols_data[c]):
                 out.append(cols_data[c][r])
     return "".join(out)
-
 
 def _pf_prepare_key(key: str):
     s = []
@@ -204,7 +337,6 @@ def rail_fence_decrypt(cipher: str, rails: int) -> str:
         rail_ptrs[r] += 1
     return "".join(res)
 
-
 _POLYBIUS_TABLE = [
     ['A','B','C','D','E'],
     ['F','G','H','I','K'],
@@ -228,6 +360,31 @@ def polybius_decrypt(text: str) -> str:
             i += 1
     return "".join(out)
 
+# =========================
+# SOCKET İLETİŞİM
+# =========================
+
+def send_message(conn, text: str):
+    data = text.encode("utf-8")
+    conn.sendall(struct.pack(">I", len(data)) + data)
+
+def recv_message(conn):
+    hdr = conn.recv(4)
+    if not hdr:
+        return None
+    (n,) = struct.unpack(">I", hdr)
+    data = b""
+    while len(data) < n:
+        chunk = conn.recv(n - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data.decode("utf-8")
+
+# =========================
+# GUI + TCP SERVER
+# =========================
+
 METHODS = [
     "Sezar (Caesar)",
     "Vigenère",
@@ -235,7 +392,8 @@ METHODS = [
     "Playfair",
     "Rail Fence",
     "Columnar Transposition",
-    "Polybius"
+    "Polybius",
+    "Hill"
 ]
 
 class PlaceholderEntry(ttk.Entry):
@@ -257,7 +415,9 @@ class PlaceholderEntry(ttk.Entry):
 
     def _focus_in(self, _):
         if self._has_placeholder:
-            self.delete(0, "end"); self.configure(foreground=self.default_fg); self._has_placeholder = False
+            self.delete(0, "end")
+            self.configure(foreground=self.default_fg)
+            self._has_placeholder = False
 
     def _focus_out(self, _):
         self._put_placeholder()
@@ -282,9 +442,11 @@ class ClientHandler(threading.Thread):
                 if msg is None:
                     self.log(f"Bağlantı kapandı: {self.addr}")
                     break
+
                 self.log(f"Gelen şifreli: {msg}")
                 try:
                     method, parsed = self._parse_key_method()
+
                     if method == "caesar":
                         plain = caesar_decrypt(msg, parsed)
                     elif method == "vigenere":
@@ -297,9 +459,14 @@ class ClientHandler(threading.Thread):
                         plain = rail_fence_decrypt(msg, parsed)
                     elif method == "columnar":
                         plain = columnar_decrypt(msg, parsed)
-                    else:  # polybius
+                    elif method == "polybius":
                         plain = polybius_decrypt(msg)
-                    self.push(msg, plain)
+                    elif method == "hill":
+                        plain = hill_decrypt(msg, parsed)
+                    else:
+                        plain = msg  # fallback
+
+                    self.push(msg, plain, method)
                 except Exception as e:
                     self.log(f"Anahtar/Yöntem hatası: {e}")
         except Exception as e:
@@ -313,30 +480,43 @@ class ClientHandler(threading.Thread):
     def _parse_key_method(self):
         m = self.method_getter()
         k = self.key_getter()
+
         if m == "Sezar (Caesar)":
             if not k.isdigit():
                 raise ValueError("Sezar için anahtar sayısal olmalı (örn: 3).")
             return ("caesar", int(k))
+
         elif m == "Vigenère":
             if not k or not k.isalpha():
                 raise ValueError("Vigenère için anahtar sadece harflerden oluşmalı (örn: LEMON).")
             return ("vigenere", k)
+
         elif m == "Substitution":
             return ("substitution", _normalize_sub_key(k))
+
         elif m == "Playfair":
             if not k or not any(c.isalpha() for c in k):
                 raise ValueError("Playfair için anahtar harf içermeli (örn: SECURITY).")
             return ("playfair", k)
+
         elif m == "Rail Fence":
             if not k.isdigit() or int(k) < 2:
                 raise ValueError("Rail Fence için ray sayısı ≥ 2 olmalı (örn: 3).")
             return ("railfence", int(k))
+
         elif m == "Columnar Transposition":
             if not k or not k.isalpha():
                 raise ValueError("Columnar için anahtar sadece harflerden oluşmalı (örn: ZEBRAS).")
             return ("columnar", k)
-        else:  # Polybius - anahtarsız
+
+        elif m == "Polybius":
             return ("polybius", None)
+
+        elif m == "Hill":
+            return ("hill", parse_hill_key(k))
+
+        else:
+            raise ValueError("Bilinmeyen yöntem")
 
 class TCPServer(threading.Thread):
     def __init__(self, host, port, key_getter, method_getter, log_fn, push_fn):
@@ -375,24 +555,30 @@ class ServerGUI:
     def __init__(self, root):
         self.root = root
         root.title("Sunucu - Mesaj Deşifreleme")
+
         style = ttk.Style()
-        try: style.theme_use("clam")
-        except: pass
+        try:
+            style.theme_use("clam")
+        except:
+            pass
 
         wrap = ttk.Frame(root, padding=12)
         wrap.grid(row=0, column=0, sticky="nsew")
-        root.columnconfigure(0, weight=1); root.rowconfigure(0, weight=1)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
         wrap.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(wrap, text="Sunucu - Mesaj Deşifreleme", font=("Segoe UI", 16, "bold")).grid(row=r, column=0, columnspan=2, pady=(0,8), sticky="w"); r += 1
+        ttk.Label(wrap, text="Sunucu - Mesaj Deşifreleme", font=("Segoe UI", 16, "bold")).grid(
+            row=r, column=0, columnspan=2, pady=(0,8), sticky="w"
+        ); r += 1
 
         ttk.Label(wrap, text="Host").grid(row=r, column=0, sticky="w")
-        self.host_entry = PlaceholderEntry(wrap, placeholder="localhost")
+        self.host_entry = PlaceholderEntry(wrap, placeholder="127.0.0.1")
         self.host_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
         ttk.Label(wrap, text="Port").grid(row=r, column=0, sticky="w")
-        self.port_entry = PlaceholderEntry(wrap, placeholder="3000")
+        self.port_entry = PlaceholderEntry(wrap, placeholder="5000")
         self.port_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
         ttk.Label(wrap, text="Deşifreleme Yöntemi").grid(row=r, column=0, sticky="w")
@@ -405,25 +591,31 @@ class ServerGUI:
         ttk.Label(wrap, text="Anahtar").grid(row=r, column=0, sticky="w")
         self.key_entry = PlaceholderEntry(
             wrap,
-            placeholder="Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | Polybius: (anahtar gerekmez)"
+            placeholder=(
+                "Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | "
+                "Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | "
+                "Polybius: (gerekmez) | Hill: '3 3 2 5'"
+            )
         )
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
-        ttk.Label(wrap, text="Gelen Şifreli").grid(row=r, column=0, sticky="w")
-        self.in_text = scrolledtext.ScrolledText(wrap, height=6)
+        ttk.Label(wrap, text="Gelen Şifreli (Ham)").grid(row=r, column=0, sticky="w")
+        self.in_text = scrolledtext.ScrolledText(wrap, height=4)
         self.in_text.grid(row=r, column=1, sticky="nsew", padx=6); r += 1
 
         ttk.Label(wrap, text="Deşifrelenmiş").grid(row=r, column=0, sticky="w")
-        self.out_text = scrolledtext.ScrolledText(wrap, height=6)
+        self.out_text = scrolledtext.ScrolledText(wrap, height=4)
         self.out_text.grid(row=r, column=1, sticky="nsew", padx=6); r += 1
 
-        btns = ttk.Frame(wrap); btns.grid(row=r, column=0, columnspan=2, pady=8, sticky="w")
+        btns = ttk.Frame(wrap)
+        btns.grid(row=r, column=0, columnspan=2, pady=8, sticky="w")
         self.start_btn = ttk.Button(btns, text="Sunucuyu Başlat", command=self.start_server)
         self.stop_btn  = ttk.Button(btns, text="Sunucuyu Durdur", command=self.stop_server, state="disabled")
         self.clear_btn = ttk.Button(btns, text="Temizle", command=self.clear_all)
         self.start_btn.pack(side="left", padx=4)
         self.stop_btn.pack(side="left", padx=4)
-        self.clear_btn.pack(side="left", padx=4); r += 1
+        self.clear_btn.pack(side="left", padx=4)
+        r += 1
 
         ttk.Label(wrap, text="Log").grid(row=r, column=0, sticky="w")
         self.log_text = scrolledtext.ScrolledText(wrap, height=8)
@@ -433,7 +625,8 @@ class ServerGUI:
         self.status.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(6,0))
 
         wrap.rowconfigure(5, weight=1)
-        wrap.rowconfigure(7, weight=1)
+        wrap.rowconfigure(6, weight=1)
+        wrap.rowconfigure(8, weight=1)
 
         self.server = None
 
@@ -446,51 +639,64 @@ class ServerGUI:
             "Playfair": "SECURITY",
             "Rail Fence": "3",
             "Columnar Transposition": "ZEBRAS",
-            "Polybius": "(anahtar gerekmez)"
+            "Polybius": "(anahtar gerekmez)",
+            "Hill": "Örn: '3 3 2 5' (2x2) | '6 24 1 13 16 10 20 17 15' (3x3)"
         }[m]
         self.key_entry.placeholder = ph
         if not self.key_entry.value():
-            self.key_entry.delete(0, "end"); self.key_entry._has_placeholder=False; self.key_entry._put_placeholder()
+            self.key_entry.delete(0, "end")
+            self.key_entry._has_placeholder=False
+            self.key_entry._put_placeholder()
 
     def log(self, s):
-        self.log_text.insert("end", s + "\n"); self.log_text.see("end")
+        self.log_text.insert("end", s + "\n")
+        self.log_text.see("end")
         self.status.config(text=s)
 
     def _get_host_port(self):
         host = self.host_entry.value()
         port_str = self.port_entry.value()
         if not host or not port_str:
-            messagebox.showerror("Eksik bilgi", "Host ve Port boş bırakılamaz."); return None
+            messagebox.showerror("Eksik bilgi", "Host ve Port boş bırakılamaz.")
+            return None
         if not port_str.isdigit():
-            messagebox.showerror("Hata", "Port sayısal olmalı."); return None
+            messagebox.showerror("Hata", "Port sayısal olmalı.")
+            return None
         return host, int(port_str)
 
     def start_server(self):
         if self.server:
-            messagebox.showinfo("Bilgi", "Sunucu zaten çalışıyor."); return
+            messagebox.showinfo("Bilgi", "Sunucu zaten çalışıyor.")
+            return
         hp = self._get_host_port()
-        if not hp: return
+        if not hp:
+            return
         host, port = hp
         self.server = TCPServer(
             host, port,
             key_getter=lambda: self.key_entry.value(),
             method_getter=lambda: self.method.get(),
             log_fn=lambda s: self.root.after(0, self.log, s),
-            push_fn=lambda c, p: self.root.after(0, self.push_to_gui, c, p)
+            push_fn=lambda c, p, meth: self.root.after(0, self.push_to_gui, c, p, meth)
         )
         self.server.start()
-        self.start_btn["state"] = "disabled"; self.stop_btn["state"] = "normal"
+        self.start_btn["state"] = "disabled"
+        self.stop_btn["state"] = "normal"
         self.log(f"Sunucu başlatıldı: {host}:{port}")
 
     def stop_server(self):
         if self.server:
-            self.server.stop(); self.server = None
-            self.start_btn["state"] = "normal"; self.stop_btn["state"] = "disabled"
+            self.server.stop()
+            self.server = None
+            self.start_btn["state"] = "normal"
+            self.stop_btn["state"] = "disabled"
             self.log("Sunucu durduruldu.")
 
-    def push_to_gui(self, cipher, plain):
-        self.in_text.insert("end", cipher + "\n"); self.in_text.see("end")
-        self.out_text.insert("end", plain + "\n"); self.out_text.see("end")
+    def push_to_gui(self, cipher, plain, method_name):
+        self.in_text.insert("end", cipher + "\n")
+        self.in_text.see("end")
+        self.out_text.insert("end", plain + "\n")
+        self.out_text.see("end")
 
     def clear_all(self):
         self.in_text.delete("1.0", "end")
