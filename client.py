@@ -4,6 +4,9 @@ import struct
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import math
+import math as _math  # gcd
+from PIL import Image, ImageTk
+
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
@@ -121,6 +124,72 @@ def hill_encrypt(text: str, key_mat):
         reinjected += "".join(enc_letters[original_letter_count:])
 
     return reinjected
+
+# =========================
+# VERNAM ŞİFRELEME
+# =========================
+
+def _vernam_clean_key(key: str) -> str:
+    if not key or not key.isalpha():
+        raise ValueError("Vernam anahtarı sadece harflerden oluşmalı (örn: SECRETKEY).")
+    return key
+
+def vernam_encrypt(text: str, key: str) -> str:
+    key = _vernam_clean_key(key)
+    out = []
+    ki = 0
+    for ch in text:
+        if ch.isalpha():
+            if ki >= len(key):
+                raise ValueError("Vernam anahtarı mesaj kadar uzun olmalı (daha uzun olabilir, ama kısa olamaz).")
+            kshift = (ord(key[ki].upper()) - 65) % 26
+            if ch.isupper():
+                cnum = ((ord(ch) - 65) + kshift) % 26
+                out.append(chr(cnum + 65))
+            else:
+                cnum = ((ord(ch) - 97) + kshift) % 26
+                out.append(chr(cnum + 97))
+            ki += 1
+        else:
+            out.append(ch)
+    return "".join(out)
+
+# =========================
+# AFFINE ŞİFRELEME
+# =========================
+
+def _affine_parse_key_client(key_text: str):
+    """
+    key_text beklenen format: "a,b" örn "5,8"
+    a ile 26 aralarında asal olmalı (gcd(a,26)=1).
+    """
+    if "," not in key_text:
+        raise ValueError("Affine anahtarı 'a,b' formatında olmalı. Örn: 5,8")
+    a_str, b_str = key_text.split(",", 1)
+    if not a_str.strip().isdigit() or not b_str.strip().isdigit():
+        raise ValueError("Affine anahtarındaki a,b sayısal olmalı. Örn: 5,8")
+    a = int(a_str) % 26
+    b = int(b_str) % 26
+    if _math.gcd(a, 26) != 1:
+        raise ValueError("Affine anahtarında 'a' ile 26 aralarında asal olmalı (gcd(a,26)=1).")
+    return (a, b)
+
+def affine_encrypt(text: str, key_tuple):
+    a, b = key_tuple
+    out = []
+    for ch in text:
+        if ch.isalpha():
+            if ch.isupper():
+                pval = ord(ch) - 65
+                cval = (a * pval + b) % 26
+                out.append(chr(cval + 65))
+            else:
+                pval = ord(ch) - 97
+                cval = (a * pval + b) % 26
+                out.append(chr(cval + 97))
+        else:
+            out.append(ch)
+    return "".join(out)
 
 # =========================
 # DİĞER ŞİFRELEME YÖNTEMLERİ
@@ -338,8 +407,31 @@ METHODS = [
     "Rail Fence",
     "Columnar Transposition",
     "Polybius",
-    "Hill"
+    "Hill",
+    "Vernam",
+    "Affine",
+    "Pigpen"
 ]
+
+def pigpen_encrypt(text: str) -> str:
+    """
+    Server tarafındaki pigpen_decrypt bunu bekliyor:
+    - Her harf -> "<harf_kucuk>.jpg"
+      'A'/'a' -> "a.jpg"
+    - Boşluk -> "|SPACE|"
+    - Diğer karakterler -> aynen gönder (noktalama vs.)
+    Çıkış tokenları tek bir string içinde boşlukla ayrılıyor.
+    """
+    tokens = []
+    for ch in text:
+        if ch == " ":
+            tokens.append("|SPACE|")
+        elif ch.isalpha():
+            tokens.append(ch.lower() + ".jpg")
+        else:
+            tokens.append(ch)
+    return " ".join(tokens)
+
 
 class PlaceholderEntry(ttk.Entry):
     def __init__(self, master=None, placeholder="", **kw):
@@ -405,7 +497,8 @@ class ClientGUI:
             placeholder=(
                 "Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | "
                 "Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | "
-                "Polybius: (gerekmez) | Hill: '3 3 2 5'"
+                "Polybius: (gerekmez) | Hill: '3 3 2 5' | Vernam: SECRETKEY | "
+                "Affine: 5,8"
             )
         )
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
@@ -436,8 +529,12 @@ class ClientGUI:
             "Rail Fence": "3",
             "Columnar Transposition": "ZEBRAS",
             "Polybius": "(anahtar gerekmez)",
-            "Hill": "Örn: '3 3 2 5' (2x2) | '6 24 1 13 16 10 20 17 15' (3x3)"
+            "Hill": "Örn: '3 3 2 5' (2x2) | '6 24 1 13 16 10 20 17 15' (3x3)",
+            "Vernam": "SECRETKEY",
+            "Affine": "a,b örn: 5,8",
+            "Pigpen": "(anahtar gerekmez)"
         }[m]
+
         self.key_entry.placeholder = ph
         if not self.key_entry.value():
             self.key_entry.delete(0, "end")
@@ -486,8 +583,23 @@ class ClientGUI:
         elif m == "Hill":
             return ("hill", parse_hill_key(k))
 
+        elif m == "Vernam":
+            if not k or not k.isalpha():
+                raise ValueError("Vernam için anahtar sadece harflerden oluşmalı (örn: SECRETKEY).")
+            return ("vernam", k)
+
+        elif m == "Affine":
+            a_b = _affine_parse_key_client(k)
+            return ("affine", a_b)
+
+        elif m == "Pigpen":
+            # Pigpen anahtar kullanmaz.
+            return ("pigpen", None)
+
         else:
             raise ValueError("Bilinmeyen yöntem")
+
+
 
     def _encrypt(self, plain: str):
         method, key = self._parse_key()
@@ -508,6 +620,12 @@ class ClientGUI:
             return polybius_encrypt(plain)
         if method == "hill":
             return hill_encrypt(plain, key)
+        if method == "vernam":
+            return vernam_encrypt(plain, key)
+        if method == "affine":
+            return affine_encrypt(plain, key)
+        if method == "pigpen":
+            return pigpen_encrypt(plain)
 
         return plain  # fallback
 

@@ -4,12 +4,14 @@ import struct
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import math
+import math as _math  # gcd için
+import os
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
 
 # =========================
-# HILL ORTAK YARDIMCI FONKSİYONLAR (DEŞİFRE İÇİN GEREKENLER)
+# ORTAK YARDIMCILAR
 # =========================
 
 def _char_to_num(ch: str) -> int:
@@ -18,6 +20,10 @@ def _char_to_num(ch: str) -> int:
 def _num_to_char(n: int, upper_like: str) -> str:
     base = ord('A') if upper_like.isupper() else ord('a')
     return chr(base + (n % 26))
+
+# =========================
+# HILL MATRIX YARDIMCI
+# =========================
 
 def _matrix_vec_mul(mat, vec, mod: int):
     n = len(mat)
@@ -34,7 +40,7 @@ def _modinv(a: int, m: int) -> int:
     for x in range(1, m):
         if (a * x) % m == 1:
             return x
-    raise ValueError("Hill anahtarı geçersiz: determinant mod 26 terslenemiyor (gcd(det,26)!=1).")
+    raise ValueError("Ters mod bulunamıyor (gcd(a,26)!=1).")
 
 def _matrix_det_mod(mat, mod: int) -> int:
     n = len(mat)
@@ -131,7 +137,7 @@ def _reinject_letters(original_text: str, new_letters, idx_map):
 
 def hill_decrypt(text: str, key_mat):
     n = len(key_mat)
-    inv_mat = _matrix_inv_mod(key_mat, 26)  # determinant terslenemezse hata atacak
+    inv_mat = _matrix_inv_mod(key_mat, 26)
 
     letters, idx_map = _extract_letters_with_index(text)
 
@@ -156,7 +162,104 @@ def hill_decrypt(text: str, key_mat):
     return reinjected
 
 # =========================
-# DİĞER DEŞİFRE YÖNTEMLERİ
+# VERNAM DEŞİFRE
+# =========================
+
+def _vernam_clean_key(key: str) -> str:
+    if not key or not key.isalpha():
+        raise ValueError("Vernam anahtarı sadece harflerden oluşmalı (örn: SECRETKEY).")
+    return key
+
+def vernam_decrypt(cipher: str, key: str) -> str:
+    key = _vernam_clean_key(key)
+    out = []
+    ki = 0
+    for ch in cipher:
+        if ch.isalpha():
+            if ki >= len(key):
+                raise ValueError("Vernam anahtarı şifreli metni çözmek için yeterince uzun değil.")
+            kshift = (ord(key[ki].upper()) - 65) % 26
+            if ch.isupper():
+                pnum = ((ord(ch) - 65) - kshift) % 26
+                out.append(chr(pnum + 65))
+            else:
+                pnum = ((ord(ch) - 97) - kshift) % 26
+                out.append(chr(pnum + 97))
+            ki += 1
+        else:
+            out.append(ch)
+    return "".join(out)
+
+# =========================
+# AFFINE DEŞİFRE
+# =========================
+
+def _affine_parse_key(key_text: str):
+    # beklenen format: "a,b" örn "5,8"
+    if "," not in key_text:
+        raise ValueError("Affine anahtarı 'a,b' formatında olmalı. Örn: 5,8")
+    a_str, b_str = key_text.split(",", 1)
+    if not a_str.strip().isdigit() or not b_str.strip().isdigit():
+        raise ValueError("Affine anahtarındaki a,b sayısal olmalı. Örn: 5,8")
+    a = int(a_str) % 26
+    b = int(b_str) % 26
+    if _math.gcd(a, 26) != 1:
+        raise ValueError("Affine anahtarında 'a' ile 26 aralarında asal olmalı (gcd(a,26)=1).")
+    return (a, b)
+
+def affine_decrypt(cipher: str, key_tuple):
+    a, b = key_tuple
+    a_inv = _modinv(a, 26)
+    out = []
+    for ch in cipher:
+        if ch.isalpha():
+            if ch.isupper():
+                cval = ord(ch) - 65
+                pval = (a_inv * ((cval - b) % 26)) % 26
+                out.append(chr(pval + 65))
+            else:
+                cval = ord(ch) - 97
+                pval = (a_inv * ((cval - b) % 26)) % 26
+                out.append(chr(pval + 97))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+# =========================
+# PIGPEN "DEŞİFRE"
+# =========================
+# Client tarafında pigpen_encrypt şöyle bir çıktı üretir:
+# "h.jpg e.jpg l.jpg l.jpg o.jpg"
+# Yani her harfi dosya adıyla temsil eder.
+#
+# Server tarafında biz bu stringi okuyup yaklaşık düz metne dönüştürüyoruz ki
+# "Deşifrelenmiş" kutusunda okunabilir bir şey gözüksün.
+#
+# Not: Bu geri dönüş sadece dosya adına bakıyor. Yani "a.jpg" -> "A"
+
+def pigpen_decrypt(cipher_token_stream: str) -> str:
+    # tokenlar boşlukla ayrılmış geliyor varsayıyoruz
+    tokens = cipher_token_stream.split()
+    out_chars = []
+    for t in tokens:
+        # örn "h.jpg" -> 'h'
+        base = os.path.basename(t)
+        if base.lower().endswith(".jpg"):
+            letter = base[:-4]  # 'h'
+            if len(letter) == 1 and letter.isalpha():
+                out_chars.append(letter.upper())
+            else:
+                out_chars.append("?")
+        else:
+            # boşluk vs gelirse direkt boşluk koy
+            if base == "|SPACE|":
+                out_chars.append(" ")
+            else:
+                out_chars.append("?")
+    return "".join(out_chars)
+
+# =========================
+# KLASİK DİĞER DEŞİFRELER
 # =========================
 
 def caesar_decrypt(text: str, shift: int) -> str:
@@ -393,7 +496,10 @@ METHODS = [
     "Rail Fence",
     "Columnar Transposition",
     "Polybius",
-    "Hill"
+    "Hill",
+    "Vernam",
+    "Affine",
+    "Pigpen"
 ]
 
 class PlaceholderEntry(ttk.Entry):
@@ -463,6 +569,12 @@ class ClientHandler(threading.Thread):
                         plain = polybius_decrypt(msg)
                     elif method == "hill":
                         plain = hill_decrypt(msg, parsed)
+                    elif method == "vernam":
+                        plain = vernam_decrypt(msg, parsed)
+                    elif method == "affine":
+                        plain = affine_decrypt(msg, parsed)
+                    elif method == "pigpen":
+                        plain = pigpen_decrypt(msg)
                     else:
                         plain = msg  # fallback
 
@@ -514,6 +626,19 @@ class ClientHandler(threading.Thread):
 
         elif m == "Hill":
             return ("hill", parse_hill_key(k))
+
+        elif m == "Vernam":
+            if not k or not k.isalpha():
+                raise ValueError("Vernam için anahtar sadece harflerden oluşmalı (örn: SECRETKEY).")
+            return ("vernam", k)
+
+        elif m == "Affine":
+            a_b = _affine_parse_key(k)
+            return ("affine", a_b)
+
+        elif m == "Pigpen":
+            # Pigpen anahtar istemiyor
+            return ("pigpen", None)
 
         else:
             raise ValueError("Bilinmeyen yöntem")
@@ -594,7 +719,8 @@ class ServerGUI:
             placeholder=(
                 "Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | "
                 "Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | "
-                "Polybius: (gerekmez) | Hill: '3 3 2 5'"
+                "Polybius: (gerekmez) | Hill: '3 3 2 5' | Vernam: SECRETKEY | "
+                "Affine: 5,8 | Pigpen: (gerekmez)"
             )
         )
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
@@ -640,7 +766,10 @@ class ServerGUI:
             "Rail Fence": "3",
             "Columnar Transposition": "ZEBRAS",
             "Polybius": "(anahtar gerekmez)",
-            "Hill": "Örn: '3 3 2 5' (2x2) | '6 24 1 13 16 10 20 17 15' (3x3)"
+            "Hill": "Örn: '3 3 2 5' (2x2) | '6 24 1 13 16 10 20 17 15' (3x3)",
+            "Vernam": "SECRETKEY",
+            "Affine": "a,b örn: 5,8",
+            "Pigpen": "(anahtar gerekmez)"
         }[m]
         self.key_entry.placeholder = ph
         if not self.key_entry.value():
@@ -695,6 +824,7 @@ class ServerGUI:
     def push_to_gui(self, cipher, plain, method_name):
         self.in_text.insert("end", cipher + "\n")
         self.in_text.see("end")
+        # plain burada Pigpen için çözdüğümüz tahmini metni de içerebilir
         self.out_text.insert("end", plain + "\n")
         self.out_text.see("end")
 
@@ -703,39 +833,6 @@ class ServerGUI:
         self.out_text.delete("1.0", "end")
         self.log_text.delete("1.0", "end")
         self.status.config(text="Temizlendi")
-
-class TCPServer(threading.Thread):
-    def __init__(self, host, port, key_getter, method_getter, log_fn, push_fn):
-        super().__init__(daemon=True)
-        self.host, self.port = host, port
-        self.key_getter, self.method_getter = key_getter, method_getter
-        self.log, self.push = log_fn, push_fn
-        self._stop = threading.Event()
-        self.sock = None
-
-    def run(self):
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.sock.bind((self.host, self.port))
-            self.sock.listen(8)
-            self.log(f"Dinlemede: {self.host}:{self.port}")
-            while not self._stop.is_set():
-                self.sock.settimeout(1.0)
-                try:
-                    conn, addr = self.sock.accept()
-                except socket.timeout:
-                    continue
-                ClientHandler(conn, addr, self.key_getter, self.method_getter, self.log, self.push).start()
-        except Exception as e:
-            self.log(f"Sunucu hatası: {e}")
-        finally:
-            if self.sock:
-                self.sock.close()
-            self.log("Sunucu durdu.")
-
-    def stop(self):
-        self._stop.set()
 
 if __name__ == "__main__":
     root = tk.Tk()
