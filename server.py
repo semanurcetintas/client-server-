@@ -7,6 +7,7 @@ import math
 import math as _math  # gcd için
 import os
 from Crypto.Cipher import DES
+from Crypto.Cipher import AES
 import base64
 
 
@@ -461,6 +462,46 @@ def des_decrypt(cipher_b64: str, key: bytes) -> str:
     plain_bytes = _pkcs5_unpad(padded)
     return plain_bytes.decode("utf-8", errors="replace")
 
+def _aes_parse_key(key_text: str) -> bytes:
+    key_text = key_text.strip()
+
+    if len(key_text) in (16, 24, 32):
+        return key_text.encode("utf-8")
+
+    if len(key_text) in (32, 48, 64):
+        try:
+            return bytes.fromhex(key_text)
+        except:
+            pass
+
+    raise ValueError("AES anahtarı 16/24/32 karakter veya 32/48/64 hex olmalı.")
+
+
+def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len]) * pad_len
+
+
+def _pkcs7_unpad(data: bytes) -> bytes:
+    if not data:
+        raise ValueError("Boş veri, padding çıkarılamıyor.")
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > 16:
+        raise ValueError("Geçersiz padding.")
+    return data[:-pad_len]
+
+
+def aes_decrypt(cipher_b64: str, key: bytes) -> str:
+    try:
+        cipher_bytes = base64.b64decode(cipher_b64)
+    except:
+        raise ValueError("AES için geçersiz Base64 şifre.")
+
+    cipher = AES.new(key, AES.MODE_ECB)
+    padded = cipher.decrypt(cipher_bytes)
+    plain_bytes = _pkcs7_unpad(padded)
+    return plain_bytes.decode("utf-8", errors="replace")
+
 
 _POLYBIUS_TABLE = [
     ['A','B','C','D','E'],
@@ -522,7 +563,8 @@ METHODS = [
     "Vernam",
     "Affine",
     "Pigpen",
-     "DES"
+     "DES",
+    "AES"
 ]
 
 class PlaceholderEntry(ttk.Entry):
@@ -600,6 +642,8 @@ class ClientHandler(threading.Thread):
                         plain = pigpen_decrypt(msg)
                     elif method == "des":
                         plain = des_decrypt(msg, parsed)
+                    elif method == "aes":
+                        plain = aes_decrypt(msg, parsed)
                     else:
                         plain = msg  # fallback
 
@@ -669,7 +713,9 @@ class ClientHandler(threading.Thread):
                 raise ValueError("DES için anahtar girilmeli (8 karakter veya 16 hex).")
             key_bytes = _des_parse_key(k)
             return ("des", key_bytes)
-
+        elif m == "AES":
+            key_bytes = _aes_parse_key(k)
+            return ("aes", key_bytes)
         else:
             raise ValueError("Bilinmeyen yöntem")
 
@@ -800,7 +846,9 @@ class ServerGUI:
             "Vernam": "SECRETKEY",
             "Affine": "a,b örn: 5,8",
             "Pigpen": "(anahtar gerekmez)",
-            "DES": "8 karakterlik anahtar (örn: 12345678 veya 16 hex)"
+            "DES": "8 karakterlik anahtar (örn: 12345678 veya 16 hex)",
+            "AES": "16/24/32 karakterlik key (örn: 1234567890123456)"
+
         }[m]
         self.key_entry.placeholder = ph
         if not self.key_entry.value():

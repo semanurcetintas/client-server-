@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import math
 from Crypto.Cipher import DES
+from Crypto.Cipher import AES
 import base64
 import math as _math  # gcd
 from PIL import Image, ImageTk
@@ -363,6 +364,26 @@ def des_encrypt(plain: str, key: bytes) -> str:
     cbytes = cipher.encrypt(padded)
     return base64.b64encode(cbytes).decode("ascii")
 
+def _aes_parse_key_client(key_text: str) -> bytes:
+    key_text = key_text.strip()
+    if len(key_text) in (16, 24, 32):
+        return key_text.encode("utf-8")
+    if len(key_text) in (32, 48, 64):
+        try:
+            return bytes.fromhex(key_text)
+        except:
+            pass
+    raise ValueError("AES anahtarı 16/24/32 karakter veya 32/48/64 hex olmalı.")
+
+
+def aes_encrypt(text: str, key: bytes) -> str:
+    data = text.encode("utf-8")
+    padded = _pkcs5_pad(data, 16)   # blok boyutu 16 (AES)
+    cipher = AES.new(key, AES.MODE_ECB)
+    encrypted = cipher.encrypt(padded)
+    return base64.b64encode(encrypted).decode("ascii")
+
+
 _POLYBIUS_TABLE = [
     ['A','B','C','D','E'],
     ['F','G','H','I','K'],
@@ -403,7 +424,8 @@ METHODS = [
     "Vernam",
     "Affine",
     "Pigpen",
-     "DES"
+     "DES",
+    "AES"
 ]
 
 def pigpen_encrypt(text: str) -> str:
@@ -518,7 +540,9 @@ class ClientGUI:
             "Vernam": "SECRETKEY",
             "Affine": "a,b örn: 5,8",
             "Pigpen": "(anahtar gerekmez)",
-            "DES": "8 karakterlik anahtar (örn: 12345678 veya 16 hex)"
+            "DES": "8 karakterlik anahtar (örn: 12345678 veya 16 hex)",
+            "AES": "16/24/32 karakterlik key (örn: 1234567890123456)"
+
         }[m]
 
         self.key_entry.placeholder = ph
@@ -587,6 +611,9 @@ class ClientGUI:
                 raise ValueError("DES için anahtar girilmeli (8 karakter veya 16 hex).")
             key_bytes = _des_parse_key_client(k)
             return ("des", key_bytes)
+        elif m == "AES":
+            key_bytes = _aes_parse_key_client(k)
+            return ("aes", key_bytes)
 
         else:
             raise ValueError("Bilinmeyen yöntem")
@@ -619,6 +646,8 @@ class ClientGUI:
             return pigpen_encrypt(plain)
         if method == "des":
             return des_encrypt(plain, key)
+        if method == "aes":
+            return aes_encrypt(plain, key)
 
         return plain  # fallback
 
