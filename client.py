@@ -4,6 +4,8 @@ import struct
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import math
+from Crypto.Cipher import DES
+import base64
 import math as _math  # gcd
 from PIL import Image, ImageTk
 
@@ -11,16 +13,15 @@ from PIL import Image, ImageTk
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
 
-# =========================
+
 # HILL ORTAK YARDIMCI FONKSİYONLAR (ŞİFRELEME İÇİN GEREKENLER)
-# =========================
+
 
 def _char_to_num(ch: str) -> int:
     # A/a -> 0 ... Z/z -> 25
     return ord(ch.upper()) - ord('A')
 
 def _num_to_char(n: int, upper_like: str) -> str:
-    # sayıyı tekrar harfe çevirirken orijinal harfin büyük/küçük durumunu koru
     base = ord('A') if upper_like.isupper() else ord('a')
     return chr(base + (n % 26))
 
@@ -35,13 +36,6 @@ def _matrix_vec_mul(mat, vec, mod: int):
     return out
 
 def parse_hill_key(key_text: str):
-    """
-    Kullanıcı Hill anahtarını boşlukla ayırarak girer:
-      "3 3 2 5"                -> 2x2
-      "6 24 1 13 16 10 20 17 15" -> 3x3
-    Genel kural: n^2 sayı -> n x n matris.
-    Hepsini mod 26'ya indiriyoruz.
-    """
     parts = key_text.replace(",", " ").split()
     if len(parts) == 0:
         raise ValueError("Hill için anahtar boş olamaz.")
@@ -67,10 +61,6 @@ def parse_hill_key(key_text: str):
     return mat
 
 def _extract_letters_with_index(text: str):
-    """
-    Metindeki sadece harfleri sırayla çek.
-    Ör: 'HeLlo!' -> letters=['H','e','L','l','o'], idx=[0,1,2,3,4]
-    """
     letters = []
     idx_map = []
     for i,ch in enumerate(text):
@@ -80,10 +70,6 @@ def _extract_letters_with_index(text: str):
     return letters, idx_map
 
 def _reinject_letters(original_text: str, new_letters, idx_map):
-    """
-    Şifrelenmiş harfleri eski konumlarına koy.
-    Harf olmayan karakterler (boşluk, noktalama) yerinde kalır.
-    """
     out_chars = list(original_text)
     ptr = 0
     for pos in idx_map:
@@ -92,15 +78,6 @@ def _reinject_letters(original_text: str, new_letters, idx_map):
     return "".join(out_chars)
 
 def hill_encrypt(text: str, key_mat):
-    """
-    Hill şifreleme (genel n x n):
-    - Sadece harfleri blok blok işler.
-    - Blok boyutu = matris boyutu n
-    - Eksik blok olursa 'X' ile doldurur.
-    - Harf olmayan karakterler yerinde kalır.
-    - Padding nedeniyle fazladan çıkan şifreli harf varsa,
-      orijinal metnin sonuna ekleriz ki kaybolmasın.
-    """
     n = len(key_mat)
     letters, idx_map = _extract_letters_with_index(text)
 
@@ -125,9 +102,8 @@ def hill_encrypt(text: str, key_mat):
 
     return reinjected
 
-# =========================
+
 # VERNAM ŞİFRELEME
-# =========================
 
 def _vernam_clean_key(key: str) -> str:
     if not key or not key.isalpha():
@@ -154,15 +130,11 @@ def vernam_encrypt(text: str, key: str) -> str:
             out.append(ch)
     return "".join(out)
 
-# =========================
+
 # AFFINE ŞİFRELEME
-# =========================
 
 def _affine_parse_key_client(key_text: str):
-    """
-    key_text beklenen format: "a,b" örn "5,8"
-    a ile 26 aralarında asal olmalı (gcd(a,26)=1).
-    """
+
     if "," not in key_text:
         raise ValueError("Affine anahtarı 'a,b' formatında olmalı. Örn: 5,8")
     a_str, b_str = key_text.split(",", 1)
@@ -191,9 +163,9 @@ def affine_encrypt(text: str, key_tuple):
             out.append(ch)
     return "".join(out)
 
-# =========================
+
 # DİĞER ŞİFRELEME YÖNTEMLERİ
-# =========================
+
 
 def caesar_encrypt(text: str, shift: int) -> str:
     shift %= 26
@@ -367,6 +339,30 @@ def rail_fence_encrypt(text: str, rails: int) -> str:
             step *= -1
     return "".join("".join(row) for row in fence)
 
+def _des_parse_key_client(key_text: str) -> bytes:
+    key_text = key_text.strip()
+    if len(key_text) == 8:
+        return key_text.encode("utf-8")
+    if len(key_text) == 16:
+        try:
+            return bytes.fromhex(key_text)
+        except ValueError:
+            pass
+    raise ValueError("DES anahtarı 8 karakter (örn: 12345678) veya 16 haneli hex olmalı.")
+
+
+def _pkcs5_pad(data: bytes, block_size: int = 8) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len]) * pad_len
+
+
+def des_encrypt(plain: str, key: bytes) -> str:
+    data = plain.encode("utf-8")
+    padded = _pkcs5_pad(data, 8)
+    cipher = DES.new(key, DES.MODE_ECB)
+    cbytes = cipher.encrypt(padded)
+    return base64.b64encode(cbytes).decode("ascii")
+
 _POLYBIUS_TABLE = [
     ['A','B','C','D','E'],
     ['F','G','H','I','K'],
@@ -387,17 +383,13 @@ def polybius_encrypt(text: str) -> str:
             out.append(ch)
     return "".join(out)
 
-# =========================
-# SOCKET GÖNDERME
-# =========================
 
+# SOCKET GÖNDERME
 def send_message(sock, text: str):
     data = text.encode("utf-8")
     sock.sendall(struct.pack(">I", len(data)) + data)
 
-# =========================
 # GUI
-# =========================
 
 METHODS = [
     "Sezar (Caesar)",
@@ -410,18 +402,11 @@ METHODS = [
     "Hill",
     "Vernam",
     "Affine",
-    "Pigpen"
+    "Pigpen",
+     "DES"
 ]
 
 def pigpen_encrypt(text: str) -> str:
-    """
-    Server tarafındaki pigpen_decrypt bunu bekliyor:
-    - Her harf -> "<harf_kucuk>.jpg"
-      'A'/'a' -> "a.jpg"
-    - Boşluk -> "|SPACE|"
-    - Diğer karakterler -> aynen gönder (noktalama vs.)
-    Çıkış tokenları tek bir string içinde boşlukla ayrılıyor.
-    """
     tokens = []
     for ch in text:
         if ch == " ":
@@ -532,7 +517,8 @@ class ClientGUI:
             "Hill": "Örn: '3 3 2 5' (2x2) | '6 24 1 13 16 10 20 17 15' (3x3)",
             "Vernam": "SECRETKEY",
             "Affine": "a,b örn: 5,8",
-            "Pigpen": "(anahtar gerekmez)"
+            "Pigpen": "(anahtar gerekmez)",
+            "DES": "8 karakterlik anahtar (örn: 12345678 veya 16 hex)"
         }[m]
 
         self.key_entry.placeholder = ph
@@ -596,9 +582,14 @@ class ClientGUI:
             # Pigpen anahtar kullanmaz.
             return ("pigpen", None)
 
+        elif m == "DES":
+            if not k:
+                raise ValueError("DES için anahtar girilmeli (8 karakter veya 16 hex).")
+            key_bytes = _des_parse_key_client(k)
+            return ("des", key_bytes)
+
         else:
             raise ValueError("Bilinmeyen yöntem")
-
 
 
     def _encrypt(self, plain: str):
@@ -626,6 +617,8 @@ class ClientGUI:
             return affine_encrypt(plain, key)
         if method == "pigpen":
             return pigpen_encrypt(plain)
+        if method == "des":
+            return des_encrypt(plain, key)
 
         return plain  # fallback
 
@@ -653,10 +646,8 @@ class ClientGUI:
             messagebox.showerror("Anahtar Hatası", str(e))
             return
 
-        # log
         self.log(f"Şifrelenmiş: {cipher}")
 
-        # sokete gönder (thread ile)
         def do_send():
             try:
                 with socket.create_connection((host, port), timeout=5) as s:

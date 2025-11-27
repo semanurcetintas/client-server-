@@ -6,13 +6,12 @@ from tkinter import ttk, scrolledtext, messagebox
 import math
 import math as _math  # gcd için
 import os
+from Crypto.Cipher import DES
+import base64
+
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
-
-# =========================
-# ORTAK YARDIMCILAR
-# =========================
 
 def _char_to_num(ch: str) -> int:
     return ord(ch.upper()) - ord('A')
@@ -21,9 +20,8 @@ def _num_to_char(n: int, upper_like: str) -> str:
     base = ord('A') if upper_like.isupper() else ord('a')
     return chr(base + (n % 26))
 
-# =========================
+
 # HILL MATRIX YARDIMCI
-# =========================
 
 def _matrix_vec_mul(mat, vec, mod: int):
     n = len(mat)
@@ -161,10 +159,8 @@ def hill_decrypt(text: str, key_mat):
 
     return reinjected
 
-# =========================
-# VERNAM DEŞİFRE
-# =========================
 
+# VERNAM DEŞİFRE
 def _vernam_clean_key(key: str) -> str:
     if not key or not key.isalpha():
         raise ValueError("Vernam anahtarı sadece harflerden oluşmalı (örn: SECRETKEY).")
@@ -190,9 +186,8 @@ def vernam_decrypt(cipher: str, key: str) -> str:
             out.append(ch)
     return "".join(out)
 
-# =========================
+
 # AFFINE DEŞİFRE
-# =========================
 
 def _affine_parse_key(key_text: str):
     # beklenen format: "a,b" örn "5,8"
@@ -225,18 +220,8 @@ def affine_decrypt(cipher: str, key_tuple):
             out.append(ch)
     return "".join(out)
 
-# =========================
-# PIGPEN "DEŞİFRE"
-# =========================
-# Client tarafında pigpen_encrypt şöyle bir çıktı üretir:
-# "h.jpg e.jpg l.jpg l.jpg o.jpg"
-# Yani her harfi dosya adıyla temsil eder.
-#
-# Server tarafında biz bu stringi okuyup yaklaşık düz metne dönüştürüyoruz ki
-# "Deşifrelenmiş" kutusunda okunabilir bir şey gözüksün.
-#
-# Not: Bu geri dönüş sadece dosya adına bakıyor. Yani "a.jpg" -> "A"
 
+# PIGPEN "DEŞİFRE"
 def pigpen_decrypt(cipher_token_stream: str) -> str:
     # tokenlar boşlukla ayrılmış geliyor varsayıyoruz
     tokens = cipher_token_stream.split()
@@ -258,9 +243,8 @@ def pigpen_decrypt(cipher_token_stream: str) -> str:
                 out_chars.append("?")
     return "".join(out_chars)
 
-# =========================
+
 # KLASİK DİĞER DEŞİFRELER
-# =========================
 
 def caesar_decrypt(text: str, shift: int) -> str:
     shift %= 26
@@ -440,6 +424,44 @@ def rail_fence_decrypt(cipher: str, rails: int) -> str:
         rail_ptrs[r] += 1
     return "".join(res)
 
+def _des_parse_key(key_text: str) -> bytes:
+    key_text = key_text.strip()
+    if len(key_text) == 8:
+        return key_text.encode("utf-8")
+    if len(key_text) == 16:
+        try:
+            return bytes.fromhex(key_text)
+        except ValueError:
+            pass
+    raise ValueError("DES anahtarı 8 karakter (örn: 12345678) veya 16 haneli hex olmalı.")
+
+
+def _pkcs5_pad(data: bytes, block_size: int = 8) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len]) * pad_len
+
+
+def _pkcs5_unpad(data: bytes) -> bytes:
+    if not data:
+        raise ValueError("Boş veri, padding çözülemedi.")
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > 8:
+        raise ValueError("Geçersiz padding.")
+    return data[:-pad_len]
+
+
+def des_decrypt(cipher_b64: str, key: bytes) -> str:
+    try:
+        cipher_bytes = base64.b64decode(cipher_b64)
+    except Exception:
+        raise ValueError("DES için beklenen formatta (Base64) şifre yok.")
+
+    cipher = DES.new(key, DES.MODE_ECB)
+    padded = cipher.decrypt(cipher_bytes)
+    plain_bytes = _pkcs5_unpad(padded)
+    return plain_bytes.decode("utf-8", errors="replace")
+
+
 _POLYBIUS_TABLE = [
     ['A','B','C','D','E'],
     ['F','G','H','I','K'],
@@ -463,9 +485,9 @@ def polybius_decrypt(text: str) -> str:
             i += 1
     return "".join(out)
 
-# =========================
+
 # SOCKET İLETİŞİM
-# =========================
+
 
 def send_message(conn, text: str):
     data = text.encode("utf-8")
@@ -484,9 +506,9 @@ def recv_message(conn):
         data += chunk
     return data.decode("utf-8")
 
-# =========================
+
 # GUI + TCP SERVER
-# =========================
+
 
 METHODS = [
     "Sezar (Caesar)",
@@ -499,7 +521,8 @@ METHODS = [
     "Hill",
     "Vernam",
     "Affine",
-    "Pigpen"
+    "Pigpen",
+     "DES"
 ]
 
 class PlaceholderEntry(ttk.Entry):
@@ -575,6 +598,8 @@ class ClientHandler(threading.Thread):
                         plain = affine_decrypt(msg, parsed)
                     elif method == "pigpen":
                         plain = pigpen_decrypt(msg)
+                    elif method == "des":
+                        plain = des_decrypt(msg, parsed)
                     else:
                         plain = msg  # fallback
 
@@ -639,6 +664,11 @@ class ClientHandler(threading.Thread):
         elif m == "Pigpen":
             # Pigpen anahtar istemiyor
             return ("pigpen", None)
+        elif m == "DES":
+            if not k:
+                raise ValueError("DES için anahtar girilmeli (8 karakter veya 16 hex).")
+            key_bytes = _des_parse_key(k)
+            return ("des", key_bytes)
 
         else:
             raise ValueError("Bilinmeyen yöntem")
@@ -769,7 +799,8 @@ class ServerGUI:
             "Hill": "Örn: '3 3 2 5' (2x2) | '6 24 1 13 16 10 20 17 15' (3x3)",
             "Vernam": "SECRETKEY",
             "Affine": "a,b örn: 5,8",
-            "Pigpen": "(anahtar gerekmez)"
+            "Pigpen": "(anahtar gerekmez)",
+            "DES": "8 karakterlik anahtar (örn: 12345678 veya 16 hex)"
         }[m]
         self.key_entry.placeholder = ph
         if not self.key_entry.value():
