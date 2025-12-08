@@ -4,22 +4,20 @@ import struct
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import math
-from Crypto.Cipher import DES
-from Crypto.Cipher import AES
-import base64
 import math as _math  # gcd
+from Crypto.Cipher import DES, AES
+import base64
 from PIL import Image, ImageTk
+import os
+from manual_block_ciphers import des_encrypt_text, aes_encrypt_text
 
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
 
-
-# HILL ORTAK YARDIMCI FONKSİYONLAR (ŞİFRELEME İÇİN GEREKENLER)
-
+# ---------- ORTAK HILL ----------
 
 def _char_to_num(ch: str) -> int:
-    # A/a -> 0 ... Z/z -> 25
     return ord(ch.upper()) - ord('A')
 
 def _num_to_char(n: int, upper_like: str) -> str:
@@ -40,25 +38,21 @@ def parse_hill_key(key_text: str):
     parts = key_text.replace(",", " ").split()
     if len(parts) == 0:
         raise ValueError("Hill için anahtar boş olamaz.")
-
     nums = []
     for p in parts:
         if not p.lstrip("-").isdigit():
             raise ValueError("Hill anahtarındaki değerler tam sayı olmalı.")
         nums.append(int(p) % 26)
-
     length = len(nums)
     n = int(round(length ** 0.5))
     if n * n != length:
         raise ValueError("Hill anahtarı n^2 adet sayı olmalı (örn 4 sayı=2x2, 9 sayı=3x3).")
-
     mat = []
     idx = 0
     for _ in range(n):
         row = nums[idx:idx+n]
         idx += n
         mat.append(row)
-
     return mat
 
 def _extract_letters_with_index(text: str):
@@ -81,12 +75,9 @@ def _reinject_letters(original_text: str, new_letters, idx_map):
 def hill_encrypt(text: str, key_mat):
     n = len(key_mat)
     letters, idx_map = _extract_letters_with_index(text)
-
-    # padding
     if len(letters) % n != 0:
         pad_needed = n - (len(letters) % n)
         letters += ['X'] * pad_needed
-
     enc_letters = []
     for i in range(0, len(letters), n):
         block = letters[i:i+n]
@@ -94,17 +85,13 @@ def hill_encrypt(text: str, key_mat):
         enc_nums = _matrix_vec_mul(key_mat, nums, 26)
         enc_block = [_num_to_char(enc_nums[j], block[j]) for j in range(n)]
         enc_letters.extend(enc_block)
-
     original_letter_count = len(idx_map)
     reinjected = _reinject_letters(text, enc_letters[:original_letter_count], idx_map)
-
     if len(enc_letters) > original_letter_count:
         reinjected += "".join(enc_letters[original_letter_count:])
-
     return reinjected
 
-
-# VERNAM ŞİFRELEME
+# ---------- VERNAM ----------
 
 def _vernam_clean_key(key: str) -> str:
     if not key or not key.isalpha():
@@ -131,11 +118,9 @@ def vernam_encrypt(text: str, key: str) -> str:
             out.append(ch)
     return "".join(out)
 
-
-# AFFINE ŞİFRELEME
+# ---------- AFFINE ----------
 
 def _affine_parse_key_client(key_text: str):
-
     if "," not in key_text:
         raise ValueError("Affine anahtarı 'a,b' formatında olmalı. Örn: 5,8")
     a_str, b_str = key_text.split(",", 1)
@@ -164,9 +149,7 @@ def affine_encrypt(text: str, key_tuple):
             out.append(ch)
     return "".join(out)
 
-
-# DİĞER ŞİFRELEME YÖNTEMLERİ
-
+# ---------- KLASİKLER ----------
 
 def caesar_encrypt(text: str, shift: int) -> str:
     shift %= 26
@@ -223,22 +206,19 @@ def _col_key_order(key: str):
         raise ValueError("Columnar için anahtar sadece harflerden oluşmalı (örn: ZEBRAS).")
     K = [(c, i) for i, c in enumerate(key.upper())]
     K_sorted = sorted(K, key=lambda x: (x[0], x[1]))
-    order = [orig_i for (_, orig_i) in K_sorted]
-    return order
+    return [orig_i for (_, orig_i) in K_sorted]
 
 def columnar_encrypt(text: str, key: str) -> str:
     order = _col_key_order(key)
     m = len(order)
     n = len(text)
     rows = math.ceil(n / m) if m > 0 else 0
-
     rows_buf = []
     idx = 0
     for _ in range(rows):
         row = list(text[idx:idx+m])
         idx += len(row)
         rows_buf.append(row)
-
     out = []
     for col in order:
         for r in range(rows):
@@ -340,49 +320,7 @@ def rail_fence_encrypt(text: str, rails: int) -> str:
             step *= -1
     return "".join("".join(row) for row in fence)
 
-def _des_parse_key_client(key_text: str) -> bytes:
-    key_text = key_text.strip()
-    if len(key_text) == 8:
-        return key_text.encode("utf-8")
-    if len(key_text) == 16:
-        try:
-            return bytes.fromhex(key_text)
-        except ValueError:
-            pass
-    raise ValueError("DES anahtarı 8 karakter (örn: 12345678) veya 16 haneli hex olmalı.")
-
-
-def _pkcs5_pad(data: bytes, block_size: int = 8) -> bytes:
-    pad_len = block_size - (len(data) % block_size)
-    return data + bytes([pad_len]) * pad_len
-
-
-def des_encrypt(plain: str, key: bytes) -> str:
-    data = plain.encode("utf-8")
-    padded = _pkcs5_pad(data, 8)
-    cipher = DES.new(key, DES.MODE_ECB)
-    cbytes = cipher.encrypt(padded)
-    return base64.b64encode(cbytes).decode("ascii")
-
-def _aes_parse_key_client(key_text: str) -> bytes:
-    key_text = key_text.strip()
-    if len(key_text) in (16, 24, 32):
-        return key_text.encode("utf-8")
-    if len(key_text) in (32, 48, 64):
-        try:
-            return bytes.fromhex(key_text)
-        except:
-            pass
-    raise ValueError("AES anahtarı 16/24/32 karakter veya 32/48/64 hex olmalı.")
-
-
-def aes_encrypt(text: str, key: bytes) -> str:
-    data = text.encode("utf-8")
-    padded = _pkcs5_pad(data, 16)   # blok boyutu 16 (AES)
-    cipher = AES.new(key, AES.MODE_ECB)
-    encrypted = cipher.encrypt(padded)
-    return base64.b64encode(encrypted).decode("ascii")
-
+# ---------- POLYBIUS ----------
 
 _POLYBIUS_TABLE = [
     ['A','B','C','D','E'],
@@ -404,13 +342,108 @@ def polybius_encrypt(text: str) -> str:
             out.append(ch)
     return "".join(out)
 
+# ---------- AES / DES (KÜTÜPHANELİ) ----------
 
-# SOCKET GÖNDERME
+def _des_parse_key_client(key_text: str) -> bytes:
+    key_text = key_text.strip()
+    if len(key_text) == 8:
+        return key_text.encode("utf-8")
+    if len(key_text) == 16:
+        try:
+            return bytes.fromhex(key_text)
+        except ValueError:
+            pass
+    raise ValueError("DES anahtarı 8 karakter (örn: 12345678) veya 16 haneli hex olmalı.")
+
+def _pkcs5_pad(data: bytes, block_size: int = 8) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len]) * pad_len
+
+def des_encrypt(plain: str, key: bytes) -> str:
+    data = plain.encode("utf-8")
+    padded = _pkcs5_pad(data, 8)
+    cipher = DES.new(key, DES.MODE_ECB)
+    cbytes = cipher.encrypt(padded)
+    return base64.b64encode(cbytes).decode("ascii")
+
+def _aes_parse_key_client(key_text: str) -> bytes:
+    key_text = key_text.strip()
+    if len(key_text) in (16, 24, 32):
+        return key_text.encode("utf-8")
+    if len(key_text) in (32, 48, 64):
+        try:
+            return bytes.fromhex(key_text)
+        except:
+            pass
+    raise ValueError("AES anahtarı 16/24/32 karakter veya 32/48/64 hex olmalı.")
+
+def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len]) * pad_len
+
+def aes_encrypt(text: str, key: bytes) -> str:
+    data = text.encode("utf-8")
+    padded = _pkcs7_pad(data, 16)
+    cipher = AES.new(key, AES.MODE_ECB)
+    encrypted = cipher.encrypt(padded)
+    return base64.b64encode(encrypted).decode("ascii")
+
+def des_encrypt_manual(plain: str, key: bytes) -> str:
+    # manual_block_ciphers.des_encrypt_text kullan
+    return des_encrypt_text(plain, key)
+
+def aes_encrypt_manual(text: str, key: bytes) -> str:
+    # manual_block_ciphers.aes_encrypt_text kullan
+    return aes_encrypt_text(text, key)
+
+# ---------- RSA (KÜTÜPHANESİZ / MANUEL, ANAHTAR DAĞITIMI) ----------
+
+def _rsa_parse_public(key_text: str):
+    if "," not in key_text:
+        raise ValueError("RSA (istemci) anahtarı 'n,e' formatında olmalı.")
+    n_str, e_str = key_text.split(",", 1)
+    n_str, e_str = n_str.strip(), e_str.strip()
+    if not n_str.isdigit() or not e_str.isdigit():
+        raise ValueError("RSA n ve e sayısal olmalı.")
+    n = int(n_str)
+    e = int(e_str)
+    return n, e
+
+def rsa_encrypt_hybrid(plain: str, n: int, e: int, log_fn=None) -> str:
+    #  Rastgele AES anahtarı üret
+    aes_key = os.urandom(16)
+    #  Mesajı AES ile şifrele
+    aes_cipher_b64 = aes_encrypt(plain, aes_key)
+    #  AES anahtarını RSA public key ile şifrele
+    nums = [pow(b, e, n) for b in aes_key]
+    key_cipher = ",".join(str(x) for x in nums)
+
+    if log_fn:
+        log_fn(f"RSA-AES modunda kullanılan AES anahtarı (hex): {aes_key.hex()}")
+
+    # RSA-AES|<rsa_encrypted_aes_key>|<aes_cipher_b64>
+    return f"RSA-AES|{key_cipher}|{aes_cipher_b64}"
+
+# ---------- PIGPEN ----------
+
+def pigpen_encrypt(text: str) -> str:
+    tokens = []
+    for ch in text:
+        if ch == " ":
+            tokens.append("|SPACE|")
+        elif ch.isalpha():
+            tokens.append(ch.lower() + ".jpg")
+        else:
+            tokens.append(ch)
+    return " ".join(tokens)
+
+# ---------- SOCKET ----------
+
 def send_message(sock, text: str):
     data = text.encode("utf-8")
     sock.sendall(struct.pack(">I", len(data)) + data)
 
-# GUI
+# ---------- GUI ----------
 
 METHODS = [
     "Sezar (Caesar)",
@@ -424,21 +457,12 @@ METHODS = [
     "Vernam",
     "Affine",
     "Pigpen",
-     "DES",
-    "AES"
+    "DES (Kütüphane)",
+    "DES (Manuel)",
+    "AES-128 (Kütüphane)",
+    "AES-128 (Manuel)",
+    "RSA (AES Anahtar Dağıtımı)"
 ]
-
-def pigpen_encrypt(text: str) -> str:
-    tokens = []
-    for ch in text:
-        if ch == " ":
-            tokens.append("|SPACE|")
-        elif ch.isalpha():
-            tokens.append(ch.lower() + ".jpg")
-        else:
-            tokens.append(ch)
-    return " ".join(tokens)
-
 
 class PlaceholderEntry(ttk.Entry):
     def __init__(self, master=None, placeholder="", **kw):
@@ -505,7 +529,8 @@ class ClientGUI:
                 "Sezar: 3 | Vigenère: LEMON | Subst.: 26 harf | "
                 "Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | "
                 "Polybius: (gerekmez) | Hill: '3 3 2 5' | Vernam: SECRETKEY | "
-                "Affine: 5,8"
+                "Affine: 5,8 | Pigpen: (gerekmez) | DES: 12345678 | "
+                "AES: 16 char (manuel), 16/24/32 (kütüphane) | RSA istemci: n,e"
             )
         )
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
@@ -540,9 +565,11 @@ class ClientGUI:
             "Vernam": "SECRETKEY",
             "Affine": "a,b örn: 5,8",
             "Pigpen": "(anahtar gerekmez)",
-            "DES": "8 karakterlik anahtar (örn: 12345678 veya 16 hex)",
-            "AES": "16/24/32 karakterlik key (örn: 1234567890123456)"
-
+            "DES (Kütüphane)": "8 karakter / 16 hex",
+            "DES (Manuel)": "8 karakter / 16 hex",
+            "AES-128 (Kütüphane)": "16/24/32 karakter (veya 32/48/64 hex)",
+            "AES-128 (Manuel)": "16 karakter veya 32 hex",
+            "RSA (AES Anahtar Dağıtımı)": "n,e (istemci public)"
         }[m]
 
         self.key_entry.placeholder = ph
@@ -603,21 +630,36 @@ class ClientGUI:
             return ("affine", a_b)
 
         elif m == "Pigpen":
-            # Pigpen anahtar kullanmaz.
             return ("pigpen", None)
 
-        elif m == "DES":
+        elif m == "DES (Kütüphane)":
             if not k:
                 raise ValueError("DES için anahtar girilmeli (8 karakter veya 16 hex).")
             key_bytes = _des_parse_key_client(k)
-            return ("des", key_bytes)
-        elif m == "AES":
+            return ("des-lib", key_bytes)
+
+        elif m == "DES (Manuel)":
+            if not k:
+                raise ValueError("DES için anahtar girilmeli (8 karakter veya 16 hex).")
+            key_bytes = _des_parse_key_client(k)
+            return ("des-manual", key_bytes)
+
+        elif m == "AES-128 (Kütüphane)":
             key_bytes = _aes_parse_key_client(k)
-            return ("aes", key_bytes)
+            return ("aes-lib", key_bytes)
+
+        elif m == "AES-128 (Manuel)":
+            key_bytes = _aes_parse_key_client(k)
+            if len(key_bytes) != 16:
+                raise ValueError("Manuel AES için anahtar 16 byte (128 bit) olmalı.")
+            return ("aes-manual", key_bytes)
+
+        elif m == "RSA (AES Anahtar Dağıtımı)":
+            n, e = _rsa_parse_public(k)
+            return ("rsa-hybrid", (n, e))
 
         else:
             raise ValueError("Bilinmeyen yöntem")
-
 
     def _encrypt(self, plain: str):
         method, key = self._parse_key()
@@ -644,10 +686,20 @@ class ClientGUI:
             return affine_encrypt(plain, key)
         if method == "pigpen":
             return pigpen_encrypt(plain)
-        if method == "des":
-            return des_encrypt(plain, key)
-        if method == "aes":
-            return aes_encrypt(plain, key)
+        if method == "des-lib":
+            return des_encrypt(plain, key)  # Crypto.Cipher DES
+
+        if method == "des-manual":
+            return des_encrypt_manual(plain, key)  # manuel DES
+
+        if method == "aes-lib":
+            return aes_encrypt(plain, key)  # Crypto.Cipher AES
+
+        if method == "aes-manual":
+            return aes_encrypt_manual(plain, key)  # manuel AES
+        if method == "rsa-hybrid":
+            n, e = key
+            return rsa_encrypt_hybrid(plain, n, e, log_fn=self.log)
 
         return plain  # fallback
 
