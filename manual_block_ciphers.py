@@ -44,27 +44,60 @@ RCON = (
     0x1B, 0x36
 )
 
-# ---------------- YARDIMCI FONKSİYONLAR ----------------
+def _clean_b64(s: str) -> str:
+    # copy/paste sırasında gelen whitespace ve satır sonlarını temizle
+    return "".join((s or "").strip().split())
+
+def _b64decode_strict(cipher_b64: str) -> bytes:
+    s = _clean_b64(cipher_b64)
+    if not s:
+        raise ValueError("Boş Base64 şifre metni.")
+    try:
+        # validate=True => Base64 değilse patlasın, sessizce çöp üretmesin
+        return base64.b64decode(s, validate=True)
+    except Exception:
+        # bazen URL-safe base64 geliyor; onu da dene
+        try:
+            return base64.urlsafe_b64decode(s + "===")  # padding tamamla
+        except Exception:
+            raise ValueError("Geçersiz Base64/URL-safe Base64 şifre metni.")
 
 def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
     pad_len = block_size - (len(data) % block_size)
     return data + bytes([pad_len]) * pad_len
 
-def _pkcs7_unpad(data: bytes, block_size: int = 16) -> bytes:
+def _pkcs7_unpad(data: bytes, block_size: int = 16, *, strict: bool = True) -> bytes:
     if not data:
         raise ValueError("Boş veri, padding çıkarılamıyor.")
     pad_len = data[-1]
     if pad_len < 1 or pad_len > block_size:
-        raise ValueError("Geçersiz padding.")
-    if data[-pad_len:] != bytes([pad_len]) * pad_len:
-        raise ValueError("Geçersiz padding.")
+        if strict:
+            raise ValueError("Geçersiz padding (pad_len aralık dışı).")
+        return data
+    tail = data[-pad_len:]
+    if tail != bytes([pad_len]) * pad_len:
+        if strict:
+            raise ValueError("Geçersiz padding (padding baytları uyuşmuyor).")
+        return data
     return data[:-pad_len]
 
-def _xtime(a: int) -> int:
-    a <<= 1
-    if a & 0x100:
-        a ^= 0x11B
-    return a & 0xFF
+def _pkcs5_pad(data: bytes, block_size: int = 8) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len]) * pad_len
+
+def _pkcs5_unpad(data: bytes, *, strict: bool = True) -> bytes:
+    if not data:
+        raise ValueError("Boş veri, padding çözülemedi.")
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > 8:
+        if strict:
+            raise ValueError("Geçersiz padding (PKCS5).")
+        return data
+    if data[-pad_len:] != bytes([pad_len]) * pad_len:
+        if strict:
+            raise ValueError("Geçersiz padding (PKCS5).")
+        return data
+    return data[:-pad_len]
 
 def _gmul(a: int, b: int) -> int:
     res = 0
@@ -95,8 +128,8 @@ def _shift_rows(state):
 def _inv_shift_rows(state):
     s = state
     s[1], s[5], s[9], s[13]   = s[13], s[1], s[5], s[9]
-    s[2], s[6], s[10], s[14]  = s[10], s[14], s[2], s[6]
-    s[3], s[7], s[11], s[15]  = s[7], s[11], s[15], s[3]
+    s[2], s[6], s[10], s[14]  = s[10], s[14], s[2], s[6]   # 2 adım sağ = 2 adım sol
+    s[3], s[7], s[11], s[15]  = s[7], s[11], s[15], s[3]   # sağ 3 = sol 1
 
 def _mix_columns(state):
     for c in range(4):
@@ -181,8 +214,6 @@ def _aes_decrypt_block(block16: bytes, round_keys):
     _add_round_key(state, round_keys[0])
     return bytes(state)
 
-# ----- Dışarıya sunulan AES fonksiyonları (metin <-> Base64) -----
-
 def aes_encrypt_text(plain: str, key: bytes) -> str:
     data = plain.encode("utf-8")
     data = _pkcs7_pad(data, 16)
@@ -192,20 +223,21 @@ def aes_encrypt_text(plain: str, key: bytes) -> str:
         out.extend(_aes_encrypt_block(data[i:i+16], rks))
     return base64.b64encode(bytes(out)).decode("ascii")
 
-def aes_decrypt_text(cipher_b64: str, key: bytes) -> str:
-    try:
-        data = base64.b64decode(cipher_b64)
-    except Exception:
-        raise ValueError("AES için geçersiz Base64 şifre.")
+def aes_decrypt_text(cipher_b64: str, key: bytes, *, strict_padding: bool = True) -> str:
+    data = _b64decode_strict(cipher_b64)
+
+    if len(data) == 0 or (len(data) % 16) != 0:
+        raise ValueError("AES şifreli veri uzunluğu 16'nın katı olmalı (Base64 bozuk/kırpılmış olabilir).")
+
     rks = _key_expansion_128(key)
     out = bytearray()
     for i in range(0, len(data), 16):
         out.extend(_aes_decrypt_block(data[i:i+16], rks))
-    out = _pkcs7_unpad(bytes(out), 16)
-    return out.decode("utf-8", errors="replace")
+
+    out_bytes = _pkcs7_unpad(bytes(out), 16, strict=strict_padding)
+    return out_bytes.decode("utf-8", errors="replace")
 
 def _feistel_f(right4: bytes, subkey4: bytes) -> bytes:
-    # right4 ve subkey4: 4 byte
     out = bytearray(4)
     for i in range(4):
         x = right4[i] ^ subkey4[i]
@@ -233,7 +265,7 @@ def _des_encrypt_block(block8: bytes, key8: bytes) -> bytes:
         newL = bytes(R)
         newR = bytes(a ^ b for a, b in zip(L, f_out))
         L, R = bytearray(newL), bytearray(newR)
-    return bytes(R + L)  # klasik Feistel swap
+    return bytes(R + L)
 
 def _des_decrypt_block(block8: bytes, key8: bytes) -> bytes:
     if len(block8) != 8:
@@ -248,20 +280,6 @@ def _des_decrypt_block(block8: bytes, key8: bytes) -> bytes:
         L, R = bytearray(newL), bytearray(newR)
     return bytes(R + L)
 
-def _pkcs5_pad(data: bytes, block_size: int = 8) -> bytes:
-    pad_len = block_size - (len(data) % block_size)
-    return data + bytes([pad_len]) * pad_len
-
-def _pkcs5_unpad(data: bytes) -> bytes:
-    if not data:
-        raise ValueError("Boş veri, padding çözülemedi.")
-    pad_len = data[-1]
-    if pad_len < 1 or pad_len > 8:
-        raise ValueError("Geçersiz padding.")
-    if data[-pad_len:] != bytes([pad_len]) * pad_len:
-        raise ValueError("Geçersiz padding.")
-    return data[:-pad_len]
-
 def des_encrypt_text(plain: str, key8: bytes) -> str:
     data = plain.encode("utf-8")
     data = _pkcs5_pad(data, 8)
@@ -270,13 +288,15 @@ def des_encrypt_text(plain: str, key8: bytes) -> str:
         out.extend(_des_encrypt_block(data[i:i+8], key8))
     return base64.b64encode(bytes(out)).decode("ascii")
 
-def des_decrypt_text(cipher_b64: str, key8: bytes) -> str:
-    try:
-        data = base64.b64decode(cipher_b64)
-    except Exception:
-        raise ValueError("DES için beklenen formatta (Base64) şifre yok.")
+def des_decrypt_text(cipher_b64: str, key8: bytes, *, strict_padding: bool = True) -> str:
+    data = _b64decode_strict(cipher_b64)
+
+    if len(data) == 0 or (len(data) % 8) != 0:
+        raise ValueError("DES şifreli veri uzunluğu 8'in katı olmalı (Base64 bozuk/kırpılmış olabilir).")
+
     out = bytearray()
     for i in range(0, len(data), 8):
         out.extend(_des_decrypt_block(data[i:i+8], key8))
-    out = _pkcs5_unpad(bytes(out))
-    return out.decode("utf-8", errors="replace")
+
+    out_bytes = _pkcs5_unpad(bytes(out), strict=strict_padding)
+    return out_bytes.decode("utf-8", errors="replace")

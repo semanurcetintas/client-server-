@@ -9,12 +9,12 @@ import os
 from Crypto.Cipher import DES, AES
 import base64
 from manual_block_ciphers import des_decrypt_text, aes_decrypt_text
+from kdf_utils import kdf_pbkdf2_sha256
 
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
 
-# ---------- ORTAK YARDIMCILAR ----------
 
 def _char_to_num(ch: str) -> int:
     return ord(ch.upper()) - ord('A')
@@ -23,7 +23,7 @@ def _num_to_char(n: int, upper_like: str) -> str:
     base = ord('A') if upper_like.isupper() else ord('a')
     return chr(base + (n % 26))
 
-# ---------- HILL MATRIX ----------
+# HILL
 
 def _matrix_vec_mul(mat, vec, mod: int):
     n = len(mat)
@@ -161,8 +161,32 @@ def hill_decrypt(text: str, key_mat):
 
     return reinjected
 
-# ---------- VERNAM ----------
 
+# RSA DOĞRUDAN
+def rsa_decrypt_text(ciphertext: str, n: int, d: int) -> str:
+    if not ciphertext.strip():
+        return ""
+
+    parts = ciphertext.split("|")
+    data = bytearray()
+
+    for p in parts:
+        c = int(p)
+        m = pow(c, d, n)
+        block = m.to_bytes((n.bit_length() + 7) // 8, "big")
+
+        block = block.lstrip(b"\x00")
+        if not block:
+            continue
+
+        ln = block[0]
+        chunk = block[1:1+ln]
+        data.extend(chunk)
+
+    return data.decode("utf-8", errors="strict")
+
+
+# VERNAM
 def _vernam_clean_key(key: str) -> str:
     if not key or not key.isalpha():
         raise ValueError("Vernam anahtarı sadece harflerden oluşmalı (örn: SECRETKEY).")
@@ -188,8 +212,7 @@ def vernam_decrypt(cipher: str, key: str) -> str:
             out.append(ch)
     return "".join(out)
 
-# ---------- AFFINE ----------
-
+# AFFINE
 def _affine_parse_key(key_text: str):
     if "," not in key_text:
         raise ValueError("Affine anahtarı 'a,b' formatında olmalı. Örn: 5,8")
@@ -220,8 +243,7 @@ def affine_decrypt(cipher: str, key_tuple):
             out.append(ch)
     return "".join(out)
 
-# ---------- PIGPEN ----------
-
+#PIGPEN
 def pigpen_decrypt(cipher_token_stream: str) -> str:
     tokens = cipher_token_stream.split()
     out_chars = []
@@ -240,7 +262,6 @@ def pigpen_decrypt(cipher_token_stream: str) -> str:
                 out_chars.append("?")
     return "".join(out_chars)
 
-# ---------- KLASİKLER ----------
 
 def caesar_decrypt(text: str, shift: int) -> str:
     shift %= 26
@@ -419,8 +440,7 @@ def rail_fence_decrypt(cipher: str, rails: int) -> str:
         rail_ptrs[r] += 1
     return "".join(res)
 
-# ---------- POLYBIUS ----------
-
+#POLYBIUS
 _POLYBIUS_TABLE = [
     ['A','B','C','D','E'],
     ['F','G','H','I','K'],
@@ -444,8 +464,7 @@ def polybius_decrypt(text: str) -> str:
             i += 1
     return "".join(out)
 
-# ---------- AES / DES (KÜTÜPHANELİ) ----------
-
+# AES/DES kütüphaneli
 def _des_parse_key(key_text: str) -> bytes:
     key_text = key_text.strip()
     if len(key_text) == 8:
@@ -505,13 +524,12 @@ def aes_decrypt(cipher_b64: str, key: bytes) -> str:
     return plain_bytes.decode("utf-8", errors="replace")
 
 def des_decrypt_manual(cipher_b64: str, key: bytes) -> str:
-    return des_decrypt_text(cipher_b64, key)
+    return des_decrypt_text(cipher_b64, key, strict_padding=False)
 
 def aes_decrypt_manual(cipher_b64: str, key: bytes) -> str:
     return aes_decrypt_text(cipher_b64, key)
 
-# ---------- RSA (KÜTÜPHANESİZ / MANUEL, ANAHTAR DAĞITIMI) ----------
-
+#RSA (KÜTÜPHANESİZ / MANUEL, ANAHTAR DAĞITIMI)
 def _rsa_parse_private(key_text: str):
     if "," not in key_text:
         raise ValueError("RSA (sunucu) anahtarı 'n,d' formatında olmalı.")
@@ -524,7 +542,6 @@ def _rsa_parse_private(key_text: str):
     return n, d
 
 def rsa_decrypt_hybrid(payload: str, n: int, d: int) -> str:
-    # Format: "RSA-AES|<rsa_encrypted_aes_key>|<aes_cipher_b64>"
     try:
         prefix, key_cipher, aes_cipher_b64 = payload.split("|", 3)
     except ValueError:
@@ -537,7 +554,6 @@ def rsa_decrypt_hybrid(payload: str, n: int, d: int) -> str:
     key_bytes = bytes(pow(c, d, n) for c in nums)
     return aes_decrypt(aes_cipher_b64, key_bytes)
 
-# ---------- SOCKET ----------
 
 def send_message(conn, text: str):
     data = text.encode("utf-8")
@@ -556,7 +572,6 @@ def recv_message(conn):
         data += chunk
     return data.decode("utf-8")
 
-# ---------- GUI + TCP SERVER ----------
 
 METHODS = [
     "Sezar (Caesar)",
@@ -574,7 +589,8 @@ METHODS = [
     "DES (Manuel)",
     "AES-128 (Kütüphane)",
     "AES-128 (Manuel)",
-    "RSA (AES Anahtar Dağıtımı)"
+    "RSA (AES Anahtar Dağıtımı)",
+    "RSA (Doğrudan)"
 ]
 
 class PlaceholderEntry(ttk.Entry):
@@ -615,6 +631,33 @@ class ClientHandler(threading.Thread):
         self.log = log_fn
         self.push = push_fn
 
+    def _method_and_key_from_gui_or_kdf(self, kdf_active: bool, kdf_salt: bytes | None, kdf_iters: int | None):
+        gui_m = self.method_getter()
+
+        if kdf_active and gui_m in ("DES (Kütüphane)", "DES (Manuel)", "AES-128 (Kütüphane)", "AES-128 (Manuel)"):
+            password = self.key_getter()
+            if not password:
+                raise ValueError("KDF aktif: Sunucu tarafında parola girilmemiş.")
+
+            if gui_m == "DES (Kütüphane)":
+                method = "des-lib"
+                key_len = 8
+            elif gui_m == "DES (Manuel)":
+                method = "des-manual"
+                key_len = 8
+            elif gui_m == "AES-128 (Kütüphane)":
+                method = "aes-lib"
+                key_len = 16
+            else:
+                method = "aes-manual"
+                key_len = 16
+
+            derived_key = kdf_pbkdf2_sha256(password, kdf_salt, length=key_len, iters=kdf_iters)
+            return method, derived_key
+
+
+        return self._parse_key_method()
+
     def run(self):
         self.log(f"Bağlandı: {self.addr}")
         try:
@@ -625,8 +668,69 @@ class ClientHandler(threading.Thread):
                     break
 
                 self.log(f"Gelen şifreli: {msg}")
+
+
+                kdf_active = False
+                kdf_name = None
+                kdf_iters = None
+                kdf_salt = None
+
+                if msg.startswith("KDF|"):
+                    kdf_active = True
+                    try:
+                        _, kdf_name, iters_s, salt_b64, msg = msg.split("|", 4)
+                        kdf_iters = int(iters_s)
+                        kdf_salt = base64.b64decode(salt_b64.encode("ascii"))
+                    except Exception:
+                        raise ValueError("KDF paketi bozuk (KDF|PBKDF2|iters|salt|cipher)")
+
+                if msg.startswith("FILE|"):
+                    try:
+                        _, filename, cipher_part = msg.split("|", 2)
+
+                        method, parsed = self._method_and_key_from_gui_or_kdf(
+                            kdf_active=kdf_active,
+                            kdf_salt=kdf_salt,
+                            kdf_iters=kdf_iters
+                        )
+
+                        allowed = {"des-lib", "des-manual", "aes-lib", "aes-manual", "rsa-hybrid"}
+                        if method not in allowed:
+                            raise ValueError("Sunucu: Dosya için bu yöntem kabul edilmiyor (DES/AES/RSA-AES).")
+
+                        if method == "des-lib":
+                            b64_plain = des_decrypt(cipher_part, parsed)
+                        elif method == "des-manual":
+                            b64_plain = des_decrypt_manual(cipher_part, parsed)
+                        elif method == "aes-lib":
+                            b64_plain = aes_decrypt(cipher_part, parsed)
+                        elif method == "aes-manual":
+                            b64_plain = aes_decrypt_manual(cipher_part, parsed)
+                        elif method == "rsa-hybrid":
+                            n, d = parsed
+                            b64_plain = rsa_decrypt_hybrid(cipher_part, n, d)
+                        else:
+                            raise ValueError("Bilinmeyen yöntem")
+
+                        raw = base64.b64decode(b64_plain.encode("ascii"))
+                        os.makedirs("received_files", exist_ok=True)
+                        out_path = os.path.join("received_files", filename)
+                        with open(out_path, "wb") as f:
+                            f.write(raw)
+
+                        self.log(f"Dosya çözüldü ve kaydedildi: {out_path}")
+                        self.push(msg, f"[DOSYA KAYDEDİLDİ] {out_path}", method)
+                    except Exception as e:
+                        self.log(f"Dosya alma/çözme hatası: {e}")
+                    continue
+
+
                 try:
-                    method, parsed = self._parse_key_method()
+                    method, parsed = self._method_and_key_from_gui_or_kdf(
+                        kdf_active=kdf_active,
+                        kdf_salt=kdf_salt,
+                        kdf_iters=kdf_iters
+                    )
 
                     if method == "caesar":
                         plain = caesar_decrypt(msg, parsed)
@@ -651,19 +755,21 @@ class ClientHandler(threading.Thread):
                     elif method == "pigpen":
                         plain = pigpen_decrypt(msg)
                     elif method == "des-lib":
-                        plain = des_decrypt(msg, parsed)  # Crypto DES
+                        plain = des_decrypt(msg, parsed)
                     elif method == "des-manual":
-                        plain = des_decrypt_manual(msg, parsed)  # manuel DES
-
+                        plain = des_decrypt_manual(msg, parsed)
                     elif method == "aes-lib":
-                        plain = aes_decrypt(msg, parsed)  # Crypto AES
+                        plain = aes_decrypt(msg, parsed)
                     elif method == "aes-manual":
-                        plain = aes_decrypt_manual(msg, parsed)  # manuel AES
+                        plain = aes_decrypt_manual(msg, parsed)
                     elif method == "rsa-hybrid":
                         n, d = parsed
                         plain = rsa_decrypt_hybrid(msg, n, d)
+                    elif method == "rsa-direct":
+                        n, d = parsed
+                        plain = rsa_decrypt_text(msg, n, d)
                     else:
-                        plain = msg  # fallback
+                        plain = msg
 
                     self.push(msg, plain, method)
                 except Exception as e:
@@ -752,6 +858,10 @@ class ClientHandler(threading.Thread):
             n, d = _rsa_parse_private(k)
             return ("rsa-hybrid", (n, d))
 
+        elif m == "RSA (Doğrudan)":
+            n, d = _rsa_parse_private(k)
+            return ("rsa-direct", (n, d))
+
         else:
             raise ValueError("Bilinmeyen yöntem")
 
@@ -833,7 +943,7 @@ class ServerGUI:
                 "Playfair: SECURITY | Rail: 3 | Columnar: ZEBRAS | "
                 "Polybius: (gerekmez) | Hill: '3 3 2 5' | Vernam: SECRETKEY | "
                 "Affine: 5,8 | Pigpen: (gerekmez) | DES: 12345678 | "
-                "AES: 16/24/32 char | RSA sunucu: n,d"
+                "AES: 16/24/32 char | RSA sunucu: n,d | KDF açıksa: parola"
             )
         )
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
@@ -883,11 +993,12 @@ class ServerGUI:
             "Vernam": "SECRETKEY",
             "Affine": "a,b örn: 5,8",
             "Pigpen": "(anahtar gerekmez)",
-            "DES (Kütüphane)": "8 karakter / 16 hex",
-            "DES (Manuel)": "8 karakter / 16 hex",
-            "AES-128 (Kütüphane)": "16/24/32 karakter (veya 32/48/64 hex)",
-            "AES-128 (Manuel)": "16 karakter veya 32 hex",
-            "RSA (AES Anahtar Dağıtımı)": "n,d (sunucu private)"
+            "DES (Kütüphane)": "8 karakter / 16 hex | KDF ise: parola",
+            "DES (Manuel)": "8 karakter / 16 hex | KDF ise: parola",
+            "AES-128 (Kütüphane)": "16/24/32 karakter (veya 32/48/64 hex) | KDF ise: parola",
+            "AES-128 (Manuel)": "16 karakter veya 32 hex | KDF ise: parola",
+            "RSA (AES Anahtar Dağıtımı)": "n,d (sunucu private)",
+            "RSA (Doğrudan)": "n,d (sunucu private)"
         }[m]
         self.key_entry.placeholder = ph
         if not self.key_entry.value():

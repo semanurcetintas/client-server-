@@ -10,12 +10,13 @@ import base64
 from PIL import Image, ImageTk
 import os
 from manual_block_ciphers import des_encrypt_text, aes_encrypt_text
+from tkinter import filedialog
+from kdf_utils import make_salt, kdf_pbkdf2_sha256, b64e
 
 
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 ALPHABET_LEN = 26
 
-# ---------- ORTAK HILL ----------
 
 def _char_to_num(ch: str) -> int:
     return ord(ch.upper()) - ord('A')
@@ -91,7 +92,7 @@ def hill_encrypt(text: str, key_mat):
         reinjected += "".join(enc_letters[original_letter_count:])
     return reinjected
 
-# ---------- VERNAM ----------
+#VERNAM
 
 def _vernam_clean_key(key: str) -> str:
     if not key or not key.isalpha():
@@ -118,7 +119,40 @@ def vernam_encrypt(text: str, key: str) -> str:
             out.append(ch)
     return "".join(out)
 
-# ---------- AFFINE ----------
+#  RSA DOĞRUDAN
+def rsa_encrypt_text(plaintext: str, n: int, e: int) -> str:
+    data = plaintext.encode("utf-8")
+    k = (n.bit_length() + 7) // 8
+    max_block = k - 2
+    if max_block < 1:
+        raise ValueError("RSA modülü çok küçük.")
+    out = []
+    for i in range(0, len(data), max_block):
+        chunk = data[i:i+max_block]
+        block = bytes([len(chunk)]) + chunk
+        m = int.from_bytes(block, "big")
+        c = pow(m, e, n)
+        out.append(str(c))
+    return "|".join(out)
+
+def rsa_decrypt_text(ciphertext: str, n: int, d: int) -> str:
+    if not ciphertext.strip():
+        return ""
+    parts = ciphertext.split("|")
+    data = bytearray()
+    for p in parts:
+        c = int(p)
+        m = pow(c, d, n)
+        block = m.to_bytes((n.bit_length() + 7) // 8, "big")
+        block = block.lstrip(b"\x00")
+        if not block:
+            continue
+        ln = block[0]
+        chunk = block[1:1+ln]
+        data.extend(chunk)
+    return data.decode("utf-8", errors="strict")
+
+#  AFFINE
 
 def _affine_parse_key_client(key_text: str):
     if "," not in key_text:
@@ -149,7 +183,6 @@ def affine_encrypt(text: str, key_tuple):
             out.append(ch)
     return "".join(out)
 
-# ---------- KLASİKLER ----------
 
 def caesar_encrypt(text: str, shift: int) -> str:
     shift %= 26
@@ -320,7 +353,7 @@ def rail_fence_encrypt(text: str, rails: int) -> str:
             step *= -1
     return "".join("".join(row) for row in fence)
 
-# ---------- POLYBIUS ----------
+# POLYBIUS
 
 _POLYBIUS_TABLE = [
     ['A','B','C','D','E'],
@@ -342,7 +375,7 @@ def polybius_encrypt(text: str) -> str:
             out.append(ch)
     return "".join(out)
 
-# ---------- AES / DES (KÜTÜPHANELİ) ----------
+# AES/DES KÜTÜPHANELİ hali
 
 def _des_parse_key_client(key_text: str) -> bytes:
     key_text = key_text.strip()
@@ -389,14 +422,12 @@ def aes_encrypt(text: str, key: bytes) -> str:
     return base64.b64encode(encrypted).decode("ascii")
 
 def des_encrypt_manual(plain: str, key: bytes) -> str:
-    # manual_block_ciphers.des_encrypt_text kullan
     return des_encrypt_text(plain, key)
 
 def aes_encrypt_manual(text: str, key: bytes) -> str:
-    # manual_block_ciphers.aes_encrypt_text kullan
     return aes_encrypt_text(text, key)
 
-# ---------- RSA (KÜTÜPHANESİZ / MANUEL, ANAHTAR DAĞITIMI) ----------
+# RSA KÜTÜPHANESİZ/MANUEL, ANAHTAR DAĞITIMI
 
 def _rsa_parse_public(key_text: str):
     if "," not in key_text:
@@ -410,21 +441,15 @@ def _rsa_parse_public(key_text: str):
     return n, e
 
 def rsa_encrypt_hybrid(plain: str, n: int, e: int, log_fn=None) -> str:
-    #  Rastgele AES anahtarı üret
     aes_key = os.urandom(16)
-    #  Mesajı AES ile şifrele
     aes_cipher_b64 = aes_encrypt(plain, aes_key)
-    #  AES anahtarını RSA public key ile şifrele
     nums = [pow(b, e, n) for b in aes_key]
     key_cipher = ",".join(str(x) for x in nums)
-
     if log_fn:
         log_fn(f"RSA-AES modunda kullanılan AES anahtarı (hex): {aes_key.hex()}")
-
-    # RSA-AES|<rsa_encrypted_aes_key>|<aes_cipher_b64>
     return f"RSA-AES|{key_cipher}|{aes_cipher_b64}"
 
-# ---------- PIGPEN ----------
+#PIGPEN
 
 def pigpen_encrypt(text: str) -> str:
     tokens = []
@@ -437,13 +462,13 @@ def pigpen_encrypt(text: str) -> str:
             tokens.append(ch)
     return " ".join(tokens)
 
-# ---------- SOCKET ----------
+#SOCKET
 
 def send_message(sock, text: str):
     data = text.encode("utf-8")
     sock.sendall(struct.pack(">I", len(data)) + data)
 
-# ---------- GUI ----------
+#GUI
 
 METHODS = [
     "Sezar (Caesar)",
@@ -461,7 +486,8 @@ METHODS = [
     "DES (Manuel)",
     "AES-128 (Kütüphane)",
     "AES-128 (Manuel)",
-    "RSA (AES Anahtar Dağıtımı)"
+    "RSA (AES Anahtar Dağıtımı)",
+    "RSA (Doğrudan)",
 ]
 
 class PlaceholderEntry(ttk.Entry):
@@ -494,6 +520,94 @@ class PlaceholderEntry(ttk.Entry):
         return "" if self._has_placeholder else self.get().strip()
 
 class ClientGUI:
+
+    def pick_file(self):
+        path = filedialog.askopenfilename(
+            title="Şifrelenecek dosyayı seç",
+            filetypes=[("All files", "*.*")]
+        )
+        if path:
+            self.file_path_var.set(path)
+            self.log(f"Dosya seçildi: {path}")
+
+    def _ensure_file_method_allowed(self):
+        m = self.method.get()
+        allowed = {
+            "DES (Kütüphane)",
+            "DES (Manuel)",
+            "AES-128 (Kütüphane)",
+            "AES-128 (Manuel)",
+            "RSA (AES Anahtar Dağıtımı)",
+        }
+        if m not in allowed:
+            raise ValueError(
+                "Dosya şifreleme için bu yöntem uygun değil. "
+                "Dosyada sadece DES/AES/RSA-AES kullan."
+            )
+
+    def encrypt_file_local(self):
+        path = self.file_path_var.get().strip()
+        if not path or not os.path.isfile(path):
+            messagebox.showerror("Hata", "Geçerli bir dosya seç.")
+            return
+
+        try:
+            self._ensure_file_method_allowed()
+            with open(path, "rb") as f:
+                raw = f.read()
+
+            b64_plain = base64.b64encode(raw).decode("ascii")
+            cipher_text = self._encrypt(b64_plain)
+
+            out_path = path + ".enc.txt"
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(cipher_text)
+
+            self.log(f"Dosya şifrelendi ve kaydedildi: {out_path}")
+            messagebox.showinfo("OK", f"Şifreli çıktı:\n{out_path}")
+
+        except Exception as e:
+            messagebox.showerror("Dosya Şifreleme Hatası", str(e))
+
+    def send_file_to_server(self):
+        host = self.host_entry.value()
+        port_str = self.port_entry.value()
+
+        path = self.file_path_var.get().strip()
+        if not path or not os.path.isfile(path):
+            messagebox.showerror("Hata", "Geçerli bir dosya seç.")
+            return
+        if not host or not port_str or not port_str.isdigit():
+            messagebox.showerror("Hata", "Host/Port hatalı.")
+            return
+
+        try:
+            self._ensure_file_method_allowed()
+            with open(path, "rb") as f:
+                raw = f.read()
+
+            b64_plain = base64.b64encode(raw).decode("ascii")
+            cipher_text = self._encrypt(b64_plain)
+
+            filename = os.path.basename(path)
+            payload = f"FILE|{filename}|{cipher_text}"
+
+        except Exception as e:
+            messagebox.showerror("Hata", str(e))
+            return
+
+        port = int(port_str)
+
+        def do_send():
+            try:
+                with socket.create_connection((host, port), timeout=5) as s:
+                    send_message(s, payload)
+                    self.log(f"Dosya gönderildi -> {host}:{port} ({filename})")
+            except Exception as e:
+                self.log(f"Dosya gönderme hatası: {e}")
+
+        threading.Thread(target=do_send, daemon=True).start()
+
     def __init__(self, root):
         root.title("İstemci - Mesaj Şifreleme")
 
@@ -522,7 +636,7 @@ class ClientGUI:
         self.method.bind("<<ComboboxSelected>>", self._on_method_change)
         r += 1
 
-        ttk.Label(wrap, text="Anahtar").grid(row=r, column=0, sticky="w")
+        ttk.Label(wrap, text="Anahtar / Parola").grid(row=r, column=0, sticky="w")
         self.key_entry = PlaceholderEntry(
             wrap,
             placeholder=(
@@ -535,9 +649,34 @@ class ClientGUI:
         )
         self.key_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
 
+        # --- KDF UI ---
+        self.use_kdf = tk.BooleanVar(value=False)
+        ttk.Checkbutton(wrap, text="KDF kullan (PBKDF2) [DES/AES için]", variable=self.use_kdf).grid(
+            row=r, column=1, sticky="w"
+        ); r += 1
+
+        ttk.Label(wrap, text="KDF Iter").grid(row=r, column=0, sticky="w")
+        self.kdf_iter_entry = ttk.Entry(wrap)
+        self.kdf_iter_entry.insert(0, "200000")
+        self.kdf_iter_entry.grid(row=r, column=1, sticky="ew", padx=6); r += 1
+
         ttk.Label(wrap, text="Mesaj").grid(row=r, column=0, sticky="w")
         self.msg_text = scrolledtext.ScrolledText(wrap, height=4)
         self.msg_text.grid(row=r, column=1, sticky="nsew", padx=6); r += 1
+
+        # --- DOSYA MODU ---
+        ttk.Label(wrap, text="Dosya").grid(row=r, column=0, sticky="w")
+        self.file_path_var = tk.StringVar(value="")
+        self.file_entry = ttk.Entry(wrap, textvariable=self.file_path_var)
+        self.file_entry.grid(row=r, column=1, sticky="ew", padx=6)
+        r += 1
+
+        file_btns = ttk.Frame(wrap)
+        file_btns.grid(row=r, column=0, columnspan=2, pady=6, sticky="w")
+        ttk.Button(file_btns, text="Dosya Seç", command=self.pick_file).pack(side="left", padx=4)
+        ttk.Button(file_btns, text="Dosyayı Şifrele (Kaydet)", command=self.encrypt_file_local).pack(side="left", padx=4)
+        ttk.Button(file_btns, text="Dosyayı Şifrele ve Sunucuya Gönder", command=self.send_file_to_server).pack(side="left", padx=4)
+        r += 1
 
         btns = ttk.Frame(wrap)
         btns.grid(row=r, column=0, columnspan=2, pady=8, sticky="w")
@@ -549,10 +688,17 @@ class ClientGUI:
         self.log_text = scrolledtext.ScrolledText(wrap, height=8)
         self.log_text.grid(row=r, column=1, sticky="nsew", padx=6); r += 1
 
-        wrap.rowconfigure(5, weight=1)
+        wrap.rowconfigure(7, weight=1)
+
+        # ilk method placeholder
+        self._on_method_change(None)
 
     def _on_method_change(self, _):
         m = self.method.get()
+        # RSA seçilirse KDF kapat (mantıklı değil)
+        if m.startswith("RSA"):
+            self.use_kdf.set(False)
+
         ph = {
             "Sezar (Caesar)": "3",
             "Vigenère": "LEMON",
@@ -565,17 +711,18 @@ class ClientGUI:
             "Vernam": "SECRETKEY",
             "Affine": "a,b örn: 5,8",
             "Pigpen": "(anahtar gerekmez)",
-            "DES (Kütüphane)": "8 karakter / 16 hex",
-            "DES (Manuel)": "8 karakter / 16 hex",
-            "AES-128 (Kütüphane)": "16/24/32 karakter (veya 32/48/64 hex)",
-            "AES-128 (Manuel)": "16 karakter veya 32 hex",
-            "RSA (AES Anahtar Dağıtımı)": "n,e (istemci public)"
+            "DES (Kütüphane)": "KDF kapalıysa: 8 karakter / 16 hex | KDF açıksa: parola",
+            "DES (Manuel)": "KDF kapalıysa: 8 karakter / 16 hex | KDF açıksa: parola",
+            "AES-128 (Kütüphane)": "KDF kapalıysa: 16/24/32 char (veya hex) | KDF açıksa: parola",
+            "AES-128 (Manuel)": "KDF kapalıysa: 16 karakter veya 32 hex | KDF açıksa: parola",
+            "RSA (AES Anahtar Dağıtımı)": "n,e (istemci public)",
+            "RSA (Doğrudan)": "n,e (public) örn: 123...,65537",
         }[m]
 
         self.key_entry.placeholder = ph
         if not self.key_entry.value():
             self.key_entry.delete(0, "end")
-            self.key_entry._has_placeholder=False
+            self.key_entry._has_placeholder = False
             self.key_entry._put_placeholder()
 
     def log(self, s):
@@ -658,10 +805,42 @@ class ClientGUI:
             n, e = _rsa_parse_public(k)
             return ("rsa-hybrid", (n, e))
 
+        elif m == "RSA (Doğrudan)":
+            n, e = _rsa_parse_public(k)
+            return ("rsa-direct", (n, e))
+
         else:
             raise ValueError("Bilinmeyen yöntem")
 
-    def _encrypt(self, plain: str):
+    def _encrypt(self, plain: str) -> str:
+        # --- KDF sadece DES/AES için ---
+        use_kdf = bool(self.use_kdf.get())
+        iters = int(self.kdf_iter_entry.get().strip() or "200000")
+        gui_m = self.method.get()
+
+        if use_kdf and gui_m in ("DES (Kütüphane)", "DES (Manuel)", "AES-128 (Kütüphane)", "AES-128 (Manuel)"):
+            password = self.key_entry.value()
+            if not password:
+                raise ValueError("KDF açıkken anahtar alanına parola gir.")
+
+            salt = make_salt()
+            key_len = 8 if gui_m.startswith("DES") else 16
+            derived_key = kdf_pbkdf2_sha256(password, salt, length=key_len, iters=iters)
+
+            # Şifrele
+            if gui_m == "DES (Kütüphane)":
+                cipher = des_encrypt(plain, derived_key)
+            elif gui_m == "DES (Manuel)":
+                cipher = des_encrypt_manual(plain, derived_key)
+            elif gui_m == "AES-128 (Kütüphane)":
+                cipher = aes_encrypt(plain, derived_key)
+            elif gui_m == "AES-128 (Manuel)":
+                cipher = aes_encrypt_manual(plain, derived_key)
+            else:
+                raise ValueError("KDF: desteklenmeyen yöntem")
+
+            return f"KDF|PBKDF2|{iters}|{b64e(salt)}|{cipher}"
+
         method, key = self._parse_key()
 
         if method == "caesar":
@@ -686,22 +865,25 @@ class ClientGUI:
             return affine_encrypt(plain, key)
         if method == "pigpen":
             return pigpen_encrypt(plain)
+
         if method == "des-lib":
-            return des_encrypt(plain, key)  # Crypto.Cipher DES
-
+            return des_encrypt(plain, key)
         if method == "des-manual":
-            return des_encrypt_manual(plain, key)  # manuel DES
-
+            return des_encrypt_manual(plain, key)
         if method == "aes-lib":
-            return aes_encrypt(plain, key)  # Crypto.Cipher AES
-
+            return aes_encrypt(plain, key)
         if method == "aes-manual":
-            return aes_encrypt_manual(plain, key)  # manuel AES
+            return aes_encrypt_manual(plain, key)
+
         if method == "rsa-hybrid":
             n, e = key
             return rsa_encrypt_hybrid(plain, n, e, log_fn=self.log)
 
-        return plain  # fallback
+        if method == "rsa-direct":
+            n, e = key
+            return rsa_encrypt_text(plain, n, e)
+
+        return plain
 
     def send_to_server(self):
         host = self.host_entry.value()
